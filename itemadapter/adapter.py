@@ -484,6 +484,18 @@ class ItemAdapter(MutableMapping):
         """
         return {key: self._asdict(value) for key, value in self.items()}
 
+    def evolve(self, updates: Any) -> Any:
+        """Return a copy of the wrapped item with the given field paths updated.
+
+        Thin wrapper around :func:`itemadapter.evolve`. See that function for
+        the supported path forms and semantics. Unlike mutating the adapter
+        directly, this also works with frozen items (frozen dataclasses,
+        frozen attrs classes).
+        """
+        from itemadapter._evolve import evolve as _evolve
+
+        return _evolve(self.item, updates)
+
     @classmethod
     def _asdict(cls, obj: Any) -> Any:
         if isinstance(obj, dict):

@@ -144,6 +144,68 @@ but it doesn't traverse the object recursively converting nested items:
 >>>
 ```
 
+### Updating fields without mutating the item (`evolve`)
+
+Setting values through the adapter mutates the wrapped object in place, which
+does not work for frozen items such as frozen dataclasses or frozen attrs
+classes. The `evolve()` function returns a *new* item with the given field
+paths updated. Paths are tuples (or dotted/bracketed strings) of field names
+(`str`) and list indices (`int`), and they may freely mix mappings, lists,
+dataclasses and attrs classes:
+
+```python
+>>> from dataclasses import dataclass, field
+>>> from itemadapter import evolve
+>>> @dataclass(frozen=True)
+... class Price:
+...     value: int
+...     currency: str = "USD"
+>>> @dataclass(frozen=True)
+... class Product:
+...     name: str
+...     price: Price
+...     tags: list = field(default_factory=list)
+...
+>>> product = Product("Stuff", Price(42), ["a", "b"])
+>>> new_product = evolve(product, {
+...     ("price", "value"): 43,
+...     ("tags", 0): "A",
+... })
+>>> new_product
+Product(name='Stuff', price=Price(value=43, currency='USD'), tags=['A', 'b'])
+>>> product  # the original item is untouched
+Product(name='Stuff', price=Price(value=42, currency='USD'), tags=['a', 'b'])
+
+```
+
+Untouched branches keep object identity (they are not copied or rebuilt), and
+an object reached through more than one path is rebuilt at most once. The
+same functionality is available as `ItemAdapter.evolve()`:
+
+```python
+>>> ItemAdapter(product).evolve({"price.value": 44}).price.value
+44
+
+```
+
+Passing `None` sets the field to `None`. Use the `DELETE` sentinel to remove a
+field or key; fields are then reset to their default (or default factory):
+
+```python
+>>> from itemadapter import DELETE
+>>> evolve(product, {("price", "currency"): DELETE}).price.currency
+'USD'
+
+```
+
+Parent path replacements conflict with nested updates, and are reported
+before any rebuilding happens, regardless of the order in which the updates
+were passed. All paths are located on the original item first, and the
+objects are rebuilt through their public constructors afterwards, so field
+declarations, `init=False` fields, default factories and frozen validation
+cannot be bypassed, and a validation failure leaves the original item
+untouched.
+
 ---
 
 ## API reference
@@ -350,6 +412,11 @@ with the names of all the defined fields for the item.
 Return a `dict` object with the contents of the adapter. This works slightly different than
 calling `dict(adapter)`, because it's applied recursively to nested items (if there are any).
 
+#### `evolve(updates: Mapping) -> Any`
+
+Return a copy of the wrapped item with the given field paths updated, without
+mutating the wrapped item. Equivalent to `itemadapter.evolve(adapter.item, updates)`.
+
 
 ### function `itemadapter.utils.is_item(obj: Any) -> bool`
 
@@ -361,6 +428,34 @@ class method is encouraged for better performance.
 ### function `itemadapter.utils.get_field_meta_from_class(item_class: type, field_name: str) -> types.MappingProxyType`
 
 Alias for `itemadapter.adapter.ItemAdapter.get_field_meta_from_class`
+
+### function `itemadapter.evolve(item: Any, updates: Mapping) -> Any`
+
+Return a copy of `item` with the given field paths updated. Keys of
+`updates` are field paths, either tuples of strings (field/key names) and
+integers (list indices), e.g. `("price", "value")` and `("tags", 0)`, or
+dotted/bracketed strings, e.g. `"price.value"` and `"tags[0]"`. A single
+path may traverse any combination of mappings, lists, dataclasses and attrs
+classes.
+
+Values are the new field values. Use the `itemadapter.DELETE` sentinel to
+remove a field or key (dataclass and attrs fields are reset to their default
+or default factory); an explicit `None` sets the field to `None`.
+
+Semantics:
+
+- Untouched branches keep object identity; each changed object is rebuilt
+  once through its public constructor, so `init=False` fields, default
+  factories and frozen-type validation are honored.
+- Conflicts between a parent path replacement and nested updates (including
+  duplicate paths) raise `itemadapter.EvolvePathError`, independently of the
+  order of `updates`.
+- Missing fields/keys raise `itemadapter.EvolveKeyError`, unsupported path
+  usages (e.g. traversing a tuple, updating an `init=False` field) raise
+  `itemadapter.EvolveTypeError`; both derive from `itemadapter.EvolveError`.
+- Paths are located on the original item before any rebuilding, so if a
+  constructor or a validator fails the original item, including its nested
+  mutable objects, is left unchanged.
 
 ---
 

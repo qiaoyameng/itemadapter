@@ -1,5 +1,18 @@
 # Changelog
 
+### Unreleased
+
+Added `evolve()`, a non-mutating way to update items along field paths:
+`evolve(item, updates)` (and `ItemAdapter.evolve(updates)`) returns a new
+item with the given field paths updated. Paths are tuples or
+dotted/bracketed strings of field names and list indices, and can traverse
+any combination of mappings, lists, dataclasses and attrs objects (the
+`attrs` package remains optional). Untouched branches keep object identity,
+each changed object is rebuilt once through its public constructor (so
+`init=False` fields, default factories and frozen validation are honored),
+parent/child path conflicts are reported regardless of argument order, and a
+validation failure during rebuilding leaves the original item untouched.
+
 ### 0.13.1 (2026-01-08)
 
 Fixed `get_json_schema()` to properly format multiline field docstrings using
