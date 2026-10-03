@@ -3,7 +3,7 @@ from __future__ import annotations
 import dataclasses
 import warnings
 from abc import ABCMeta, abstractmethod
-from collections.abc import Iterable, Iterator, KeysView, MutableMapping
+from collections.abc import Iterable, Iterator, KeysView, Mapping, MutableMapping, Sequence
 from functools import lru_cache
 from types import MappingProxyType
 from typing import Any
@@ -483,6 +483,19 @@ class ItemAdapter(MutableMapping):
         than calling `dict(adapter)`: it's applied recursively to nested items (if there are any).
         """
         return {key: self._asdict(value) for key, value in self.items()}
+
+    def evolve(
+        self, changes: "Mapping[Sequence, Any] | Sequence[tuple[Sequence, Any]]"
+    ) -> Any:
+        """Return a copy of the wrapped item with *changes* applied.
+
+        The original item is never mutated: every touched node is rebuilt
+        through its real constructor, while untouched nodes keep their
+        identity. See :func:`itemadapter.evolve` for the full semantics.
+        """
+        from itemadapter._evolve import evolve
+
+        return evolve(self.item, changes)
 
     @classmethod
     def _asdict(cls, obj: Any) -> Any:
