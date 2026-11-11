@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import typing
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from types import MappingProxyType
-from typing import Annotated, Any, NotRequired, Required, get_args, get_origin
+from typing import TYPE_CHECKING, Annotated, Any, NotRequired, Required, get_args, get_origin
+
+if TYPE_CHECKING:
+    from itemadapter.adapter import AdapterInterface
 
 from itemadapter._imports import (
     PydanticUndefined,
@@ -125,3 +128,57 @@ def _get_typed_dict_field_metadata(
     if field_name not in type_hints:
         raise KeyError(f"{item_class.__name__} does not support field: {field_name}")
     return _split_typed_dict_hint(type_hints[field_name])[0]
+
+
+ALIAS_METADATA_KEY = "alias"
+
+
+def _metadata_aliases_from_class(
+    adapter_class: type[AdapterInterface], item_class: type, field_names: Iterable[str]
+) -> dict[str, str]:
+    """Return the field aliases declared in the field metadata of the given
+    item class, as a {field_name: alias} dict."""
+    aliases: dict[str, str] = {}
+    for field_name in field_names:
+        metadata = adapter_class.get_field_meta_from_class(item_class, field_name)
+        alias = metadata.get(ALIAS_METADATA_KEY)
+        if alias is not None:
+            aliases[field_name] = alias
+    return aliases
+
+
+def _resolve_aliases(
+    field_names: tuple[str, ...],
+    aliases: Mapping[str, str],
+    *,
+    item_class_name: str,
+) -> MappingProxyType[str, str]:
+    """Validate the given {field_name: alias} mapping against the defined
+    field names and return it as a read-only mapping.
+
+    Aliases must not target unknown fields, two fields must not share an
+    alias, and an alias must not collide with the name of a field that is not
+    itself renamed.
+    """
+    for field_name in aliases:
+        if field_name not in field_names:
+            raise ValueError(
+                f"Cannot define an alias for unknown field {field_name!r} of "
+                f"{item_class_name}; valid fields are: {', '.join(field_names)}"
+            )
+    used_aliases: set[str] = set()
+    for field_name, alias in aliases.items():
+        if alias in used_aliases:
+            raise ValueError(
+                f"Duplicate alias {alias!r} for field {field_name!r} of "
+                f"{item_class_name}: another field already uses the same alias"
+            )
+        used_aliases.add(alias)
+    renamed_fields = set(aliases)
+    for field_name, alias in aliases.items():
+        if alias in field_names and alias not in renamed_fields:
+            raise ValueError(
+                f"Alias {alias!r} for field {field_name!r} of {item_class_name} "
+                f"collides with the name of an unrenamed field"
+            )
+    return MappingProxyType(dict(aliases))

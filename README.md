@@ -161,7 +161,7 @@ The following adapters are included by default:
 * `itemadapter.adapter.AttrsAdapter`: handles `attrs` objects
 * `itemadapter.adapter.PydanticAdapter`: handles `pydantic` objects
 
-### class `itemadapter.adapter.ItemAdapter(item: Any)`
+### class `itemadapter.adapter.ItemAdapter(item: Any, field_aliases: Optional[Mapping[str, str]] = None)`
 
 This is the main entrypoint for the package. Tipically, user code
 wraps an item using this class, and proceeds to handle it with the provided interface.
@@ -169,6 +169,10 @@ wraps an item using this class, and proceeds to handle it with the provided inte
 [`MutableMapping`](https://docs.python.org/3/library/collections.abc.html#collections.abc.MutableMapping)
 interface, providing a `dict`-like API to manipulate data for the object it wraps
 (which is modified in-place).
+
+The optional `field_aliases` mapping exposes fields under different names
+without renaming them on the wrapped item. See the [field aliases
+section](#field-aliases) for details.
 
 **Attributes**
 
@@ -356,6 +360,85 @@ with the names of all the defined fields for the item.
 
 Return a `dict` object with the contents of the adapter. This works slightly different than
 calling `dict(adapter)`, because it's applied recursively to nested items (if there are any).
+
+### Field aliases
+
+Sometimes the same object is referred to by different names in different
+contexts, e.g. a field named `product_id` internally but `sku` by an external
+API. Instead of renaming the underlying fields manually at every boundary,
+`ItemAdapter` can expose an explicit alias view. The wrapped item is never
+modified: its field names stay the same, only the adapter's view changes.
+
+Aliases can be declared in field metadata, under the `"alias"` key:
+
+```python
+>>> from dataclasses import dataclass, field
+>>> from itemadapter import ItemAdapter
+>>> @dataclass
+... class Product:
+...     product_id: str = field(metadata={"alias": "sku"})
+...     name: str = ""
+...
+>>> adapter = ItemAdapter(Product(product_id="A1"))
+>>> adapter["sku"]
+'A1'
+>>> adapter.asdict()
+{'sku': 'A1', 'name': ''}
+>>> adapter.item.product_id
+'A1'
+>>>
+```
+
+Or they can be provided when creating the adapter, as a `{field_name: alias}`
+mapping, which takes precedence over metadata aliases:
+
+```python
+>>> adapter = ItemAdapter(Product(product_id="A1"), field_aliases={"product_id": "sku"})
+>>> adapter["sku"]
+'A1'
+>>>
+```
+
+When aliases are in use, the whole adapter works in the alias namespace:
+item access (`adapter["sku"]`), `field_names()`, iteration, `asdict()` and the
+JSON Schema export all use aliases for renamed fields and the original names
+for the rest. A field that has an alias is only accessible through that alias;
+accessing it through its original name raises `KeyError`. This behavior is the
+same for every supported item type.
+
+Aliases are validated before the wrapped item is read or modified, and a
+`ValueError` is raised when:
+
+- an alias targets an unknown field,
+- two fields use the same alias,
+- an alias collides with the name of a field that is not itself renamed.
+
+Swapping the names of two fields is allowed, as long as both fields are
+renamed:
+
+```python
+>>> @dataclass
+... class TwoFields:
+...     product_id: str = ""
+...     sku: str = ""
+...
+>>> adapter = ItemAdapter(
+...     TwoFields(product_id="p", sku="s"),
+...     field_aliases={"product_id": "sku", "sku": "product_id"},
+... )
+>>> adapter.asdict()
+{'sku': 'p', 'product_id': 's'}
+>>>
+```
+
+Nested items apply their own alias mappings independently, both in
+`asdict()` and in the JSON Schema export. Aliases require item types with
+declared fields (`dataclass`, `attrs`, `pydantic` and `scrapy` items, and
+`TypedDict` classes for schema export); plain `dict` objects have no field
+definitions and cannot be given aliases.
+
+Without aliases, `ItemAdapter` behaves exactly as before and keeps using the
+original field names.
 
 
 ### function `itemadapter.utils.is_item(obj: Any) -> bool`

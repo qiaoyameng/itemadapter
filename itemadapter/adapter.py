@@ -3,7 +3,7 @@ from __future__ import annotations
 import dataclasses
 import warnings
 from abc import ABCMeta, abstractmethod
-from collections.abc import Iterable, Iterator, KeysView, MutableMapping
+from collections.abc import Iterable, Iterator, KeysView, Mapping, MutableMapping
 from functools import lru_cache
 from types import MappingProxyType
 from typing import Any, ClassVar, cast
@@ -18,12 +18,15 @@ from itemadapter._json_schema import (
     _JsonSchemaState,
     _setdefault_attribute_docstrings_on_json_schema,
     _setdefault_attribute_types_on_json_schema,
+    apply_aliases_to_json_schema,
 )
 from itemadapter._utils import (
     _get_pydantic_model_metadata,
     _get_typed_dict_field_metadata,
     _is_attrs_class,
     _is_pydantic_model,
+    _metadata_aliases_from_class,
+    _resolve_aliases,
 )
 
 __all__ = [
@@ -45,8 +48,60 @@ class AdapterInterface(MutableMapping[str, Any], metaclass=ABCMeta):
     abtract methods inherited from the MutableMapping base class.
     """
 
-    def __init__(self, item: Any) -> None:
+    def __init__(self, item: Any, field_aliases: Mapping[str, str] | None = None) -> None:
         self.item = item
+        self._field_aliases = self._build_field_aliases(field_aliases)
+        self._reverse_aliases = {alias: name for name, alias in self._field_aliases.items()}
+
+    def _build_field_aliases(
+        self, field_aliases: Mapping[str, str] | None
+    ) -> MappingProxyType[str, str]:
+        """Return the validated {field_name: alias} mapping for the wrapped
+        item, combining aliases from field metadata with the ones provided by
+        the caller (which take precedence).
+
+        Raises ValueError if the resulting mapping is invalid, before the
+        wrapped item is read or modified in any way.
+        """
+        field_names = self.get_field_names_from_class(self.item.__class__)
+        if field_names is None:
+            if field_aliases:
+                raise ValueError(
+                    f"Cannot define field aliases for items of type "
+                    f"{self.item.__class__.__name__}: the item type does not "
+                    f"define fields"
+                )
+            return MappingProxyType({})
+        field_names = tuple(field_names)
+        aliases = _metadata_aliases_from_class(
+            self.__class__, self.item.__class__, field_names
+        )
+        if field_aliases:
+            aliases.update(field_aliases)
+        return _resolve_aliases(
+            field_names, aliases, item_class_name=self.item.__class__.__name__
+        )
+
+    def to_field_name(self, name: str) -> str:
+        """Return the underlying field name for the given alias-view name.
+
+        Names of fields without an alias are returned unchanged. Names of
+        fields that have an alias are not part of the alias view, so they
+        raise KeyError.
+        """
+        if name in self._reverse_aliases:
+            return self._reverse_aliases[name]
+        if name in self._field_aliases:
+            raise KeyError(name)
+        return name
+
+    def to_alias(self, field_name: str) -> str:
+        """Return the alias-view name for the given underlying field name."""
+        return self._field_aliases.get(field_name, field_name)
+
+    def aliased_field_names(self, field_names: Iterable[str]) -> list[str]:
+        """Return the alias-view names for the given underlying field names."""
+        return [self.to_alias(field_name) for field_name in field_names]
 
     @classmethod
     @abstractmethod
@@ -130,8 +185,8 @@ class _MixinAttrsDataclassAdapter:
 
 
 class AttrsAdapter(_MixinAttrsDataclassAdapter, AdapterInterface):
-    def __init__(self, item: Any) -> None:
-        super().__init__(item)
+    def __init__(self, item: Any, field_aliases: Mapping[str, str] | None = None) -> None:
+        super().__init__(item, field_aliases)
         if attrs is None:
             raise RuntimeError("attrs module is not available")
         # store a reference to the item's fields to avoid O(n) lookups and O(n^2) traversals
@@ -169,8 +224,8 @@ class AttrsAdapter(_MixinAttrsDataclassAdapter, AdapterInterface):
 
 
 class DataclassAdapter(_MixinAttrsDataclassAdapter, AdapterInterface):
-    def __init__(self, item: Any) -> None:
-        super().__init__(item)
+    def __init__(self, item: Any, field_aliases: Mapping[str, str] | None = None) -> None:
+        super().__init__(item, field_aliases)
         # store a reference to the item's fields to avoid O(n) lookups and O(n^2) traversals
         self._fields_dict = {field.name: field for field in dataclasses.fields(self.item)}
 
@@ -383,6 +438,15 @@ def _find_adapter_class(
 class ItemAdapter(MutableMapping[str, Any]):
     """Wrapper class to interact with data container objects. It provides a common interface
     to extract and set data without having to take the object's type into account.
+
+    :param item: The item to interact with.
+    :param field_aliases: Optional mapping of field names to alias names. When
+        provided (or when fields declare an ``"alias"`` entry in their
+        metadata), the adapter exposes an alias view: item access,
+        :meth:`field_names` and :meth:`asdict` use aliases for the renamed
+        fields, while the underlying field names of the item are left
+        unchanged. Fields with an alias are only accessible through their
+        alias; fields without one keep their original name.
     """
 
     ADAPTER_CLASSES: ClassVar[Iterable[type[AdapterInterface]]] = (
@@ -393,7 +457,7 @@ class ItemAdapter(MutableMapping[str, Any]):
         PydanticAdapter,
     )
 
-    def __init__(self, item: Any) -> None:
+    def __init__(self, item: Any, field_aliases: Mapping[str, str] | None = None) -> None:
         adapter_classes = tuple(self.ADAPTER_CLASSES)
         adapter_class, item_overrides = _find_adapter_class(adapter_classes, item.__class__)
         if item_overrides:
@@ -407,7 +471,13 @@ class ItemAdapter(MutableMapping[str, Any]):
             )
         if adapter_class is None:
             raise TypeError(f"No adapter found for objects of type: {type(item)} ({item})")
-        self.adapter = adapter_class(item)
+        if field_aliases is None:
+            # Avoid passing the extra argument to adapter classes that do not
+            # support it, e.g. custom adapters with an __init__ that only
+            # takes the item.
+            self.adapter = adapter_class(item)
+        else:
+            self.adapter = adapter_class(item, field_aliases)
 
     @classmethod
     def is_item(cls, item: Any) -> bool:
@@ -446,7 +516,16 @@ class ItemAdapter(MutableMapping[str, Any]):
     ) -> dict[str, Any]:
         _state = _state or _JsonSchemaState(adapter=cls, containers={item_class})
         adapter_class = cls._get_adapter_class(item_class)
-        return adapter_class.get_json_schema(item_class, _state=_state)
+        schema = adapter_class.get_json_schema(item_class, _state=_state)
+        field_names = adapter_class.get_field_names_from_class(item_class)
+        if field_names is None:
+            return schema
+        aliases = _metadata_aliases_from_class(adapter_class, item_class, field_names)
+        if not aliases:
+            return schema
+        return apply_aliases_to_json_schema(
+            schema, field_names, aliases, item_class_name=item_class.__name__
+        )
 
     @property
     def item(self) -> Any:
@@ -457,31 +536,40 @@ class ItemAdapter(MutableMapping[str, Any]):
         return f"<{self.__class__.__name__} for {self.item.__class__.__name__}({values})>"
 
     def __getitem__(self, field_name: str) -> Any:
-        return self.adapter.__getitem__(field_name)
+        return self.adapter.__getitem__(self.adapter.to_field_name(field_name))
 
     def __setitem__(self, field_name: str, value: Any) -> None:
-        self.adapter.__setitem__(field_name, value)
+        self.adapter.__setitem__(self.adapter.to_field_name(field_name), value)
 
     def __delitem__(self, field_name: str) -> None:
-        self.adapter.__delitem__(field_name)
+        self.adapter.__delitem__(self.adapter.to_field_name(field_name))
 
     def __iter__(self) -> Iterator[str]:
-        return self.adapter.__iter__()
+        return iter(self.adapter.to_alias(field_name) for field_name in self.adapter.__iter__())
 
     def __len__(self) -> int:
         return self.adapter.__len__()
 
     def get_field_meta(self, field_name: str) -> MappingProxyType[str, Any]:
         """Return metadata for the given field name."""
-        return self.adapter.get_field_meta(field_name)
+        return self.adapter.get_field_meta(self.adapter.to_field_name(field_name))
 
     def field_names(self) -> KeysView[str]:
-        """Return read-only key view with the names of all the defined fields for the item."""
-        return self.adapter.field_names()
+        """Return read-only key view with the names of all the defined fields for the item.
+
+        The names follow the alias view: aliases are used for renamed fields,
+        original names for the rest.
+        """
+        if not self.adapter._field_aliases:
+            return self.adapter.field_names()
+        return KeysView(
+            dict.fromkeys(self.adapter.aliased_field_names(self.adapter.field_names()))
+        )
 
     def asdict(self) -> dict[str, Any]:
         """Return a dict object with the contents of the adapter. This works slightly different
         than calling `dict(adapter)`: it's applied recursively to nested items (if there are any).
+        Nested items apply their own alias mappings.
         """
         return {key: self._asdict(value) for key, value in self.items()}
 

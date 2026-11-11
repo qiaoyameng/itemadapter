@@ -24,7 +24,7 @@ from typing import (
 )
 
 from ._imports import PydanticUndefined, _get_type_hints, attrs
-from ._utils import _split_typed_dict_hint
+from ._utils import _resolve_aliases, _split_typed_dict_hint
 
 if TYPE_CHECKING:
     from attrs import Attribute
@@ -494,6 +494,31 @@ def base_json_schema_from_item_class(item_class: type) -> dict[str, Any]:
     schema = copy(json_schema_extra)
     schema.setdefault("type", "object")
     schema.setdefault("additionalProperties", False)
+    return schema
+
+
+def apply_aliases_to_json_schema(
+    schema: dict[str, Any],
+    field_names: Iterable[str],
+    aliases: Mapping[str, str],
+    *,
+    item_class_name: str,
+) -> dict[str, Any]:
+    """Rename the properties and required entries of a JSON Schema according
+    to the given {field_name: alias} mapping, validating the aliases first."""
+    resolved_aliases = _resolve_aliases(
+        tuple(field_names), aliases, item_class_name=item_class_name
+    )
+    properties = schema.get("properties")
+    if properties is not None:
+        schema["properties"] = {
+            resolved_aliases.get(field_name, field_name): prop
+            for field_name, prop in properties.items()
+        }
+    if "required" in schema:
+        schema["required"] = [
+            resolved_aliases.get(field_name, field_name) for field_name in schema["required"]
+        ]
     return schema
 
 

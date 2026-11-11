@@ -1,5 +1,18 @@
 # Changelog
 
+### Unreleased
+
+Added support for field aliases: an `ItemAdapter` can now expose fields under
+different names through an explicit alias view, while the field names on the
+wrapped item are left unchanged. Aliases are taken from the `"alias"` entry of
+field metadata or from the new optional `field_aliases` argument of
+`ItemAdapter()`, which takes precedence. Item access, `field_names()`,
+`asdict()` and the JSON Schema export all use the alias namespace, and nested
+items apply their own alias mappings. Unknown fields, duplicate aliases and
+aliases colliding with the name of an unrenamed field raise `ValueError`
+before the wrapped item is read or modified. Without aliases the behavior is
+unchanged.
+
 ### 0.14.0 (2026-10-29)
 
 Removed support for Python 3.9 and 3.10, and added support for Python 3.15
