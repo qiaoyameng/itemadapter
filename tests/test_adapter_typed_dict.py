@@ -110,7 +110,13 @@ class TestTypedDict:
             "type": "object",
             "additionalProperties": False,
             "properties": {
-                "nested": {
+                "nested": {"$ref": "#/$defs/TypedDictItem"},
+                "tags": {"type": "array", "items": {"type": "string"}},
+                "brand": {"type": ["null", "string"]},
+            },
+            "required": ["nested", "tags", "brand"],
+            "$defs": {
+                "TypedDictItem": {
                     "type": "object",
                     "additionalProperties": False,
                     "properties": {
@@ -119,10 +125,7 @@ class TestTypedDict:
                     },
                     "required": ["name", "value"],
                 },
-                "tags": {"type": "array", "items": {"type": "string"}},
-                "brand": {"type": ["null", "string"]},
             },
-            "required": ["nested", "tags", "brand"],
         }
         check_schemas(actual, expected)
 
@@ -168,8 +171,16 @@ class TestTypedDict:
         expected = {
             "type": "object",
             "additionalProperties": False,
-            "properties": {"child": {"type": "object"}},
+            "properties": {"child": {"$ref": "#/$defs/TypedDictItemRecursive"}},
             "required": ["child"],
+            "$defs": {
+                "TypedDictItemRecursive": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {"child": {"$ref": "#/$defs/TypedDictItemRecursive"}},
+                    "required": ["child"],
+                },
+            },
         }
         check_schemas(actual, expected)
 
@@ -306,7 +317,11 @@ class TestTypedDictCrossNesting:
             "type": "object",
             "additionalProperties": False,
             "properties": {
-                "nested": {
+                "nested": {"$ref": "#/$defs/TypedDictItem"},
+            },
+            "required": ["nested"],
+            "$defs": {
+                "TypedDictItem": {
                     "type": "object",
                     "additionalProperties": False,
                     "properties": {
@@ -314,9 +329,8 @@ class TestTypedDictCrossNesting:
                         "value": {"minimum": 0, "type": "integer"},
                     },
                     "required": ["name", "value"],
-                }
+                },
             },
-            "required": ["nested"],
         }
         check_schemas(actual, expected)
 
@@ -329,18 +343,21 @@ class TestTypedDictCrossNesting:
                 "nested": {
                     "anyOf": [
                         {"type": "null"},
-                        {
-                            "type": "object",
-                            "additionalProperties": False,
-                            "properties": {
-                                "name": {"type": "string", "description": "Display name"},
-                                "value": {"minimum": 0, "type": "integer"},
-                            },
-                            "required": ["name", "value"],
-                        },
+                        {"$ref": "#/$defs/TypedDictItem"},
                     ]
                 }
             },
             "required": ["nested"],
+            "$defs": {
+                "TypedDictItem": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "name": {"type": "string", "description": "Display name"},
+                        "value": {"minimum": 0, "type": "integer"},
+                    },
+                    "required": ["name", "value"],
+                },
+            },
         }
         check_schemas(actual, expected)

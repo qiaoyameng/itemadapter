@@ -218,7 +218,7 @@ class BaseTestMixin:
         check_schemas(actual, expected)
 
 
-_NESTED_JSON_SCHEMA = {
+_NESTED_DEFINITION = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
@@ -227,10 +227,41 @@ _NESTED_JSON_SCHEMA = {
 }
 
 
-class NonDictTestMixin(BaseTestMixin):
-    item_class_subclassed = None
-    item_class_empty = None
-    expected_json_schema = {
+def _nested_ref(name):
+    return {"$ref": f"#/$defs/{name}"}
+
+
+def _nested_properties(name):
+    """Return the four nested item properties as $refs to a definition named
+    *name*."""
+    ref = _nested_ref(name)
+    return {
+        "nested": ref,
+        "nested_list": {
+            "type": "array",
+            "items": ref,
+        },
+        "nested_dict": {
+            "type": "object",
+            "additionalProperties": ref,
+        },
+        "nested_dict_list": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": ref,
+            },
+        },
+    }
+
+
+def _make_expected_json_schema(nested_name, nested_definition=None):
+    """Return the expected JSON Schema for a *JsonSchema item class whose four
+    nested fields point at a $defs definition named *nested_name*."""
+    if nested_definition is None:
+        nested_definition = _NESTED_DEFINITION
+    ref = _nested_ref(nested_name)
+    return {
         "llmHint": "Hi model!",
         "type": "object",
         "additionalProperties": False,
@@ -256,20 +287,20 @@ class NonDictTestMixin(BaseTestMixin):
                 "type": "object",
                 "additionalProperties": {"type": "string"},
             },
-            "nested": _NESTED_JSON_SCHEMA,
+            "nested": ref,
             "nested_list": {
                 "type": "array",
-                "items": _NESTED_JSON_SCHEMA,
+                "items": ref,
             },
             "nested_dict": {
                 "type": "object",
-                "additionalProperties": _NESTED_JSON_SCHEMA,
+                "additionalProperties": ref,
             },
             "nested_dict_list": {
                 "type": "array",
                 "items": {
                     "type": "object",
-                    "additionalProperties": _NESTED_JSON_SCHEMA,
+                    "additionalProperties": ref,
                 },
             },
         },
@@ -284,7 +315,14 @@ class NonDictTestMixin(BaseTestMixin):
             "nested_dict",
             "nested_dict_list",
         ],
+        "$defs": {nested_name: nested_definition},
     }
+
+
+class NonDictTestMixin(BaseTestMixin):
+    item_class_subclassed = None
+    item_class_empty = None
+    expected_json_schema = _make_expected_json_schema("DataClassItemJsonSchemaNested")
 
     def test_set_value_keyerror(self):
         item = self.item_class()
@@ -370,7 +408,7 @@ class TestDict(BaseTestMixin):
         assert ItemAdapter.get_field_names_from_class(dict) is None
 
 
-_SCRAPY_NESTED_JSON_SCHEMA = {
+_SCRAPY_NESTED_DEFINITION = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
@@ -378,26 +416,27 @@ _SCRAPY_NESTED_JSON_SCHEMA = {
     },
 }
 
+
+_SCRAPY_BASE = _make_expected_json_schema(
+    "ScrapySubclassedItemJsonSchemaNested", _SCRAPY_NESTED_DEFINITION
+)
 _SCRAPY_JSON_SCHEMA_PROPERTIES = {
-    **NonDictTestMixin.expected_json_schema["properties"],
+    **{
+        k: v
+        for k, v in _SCRAPY_BASE["properties"].items()
+        if k
+        not in {
+            "name",
+            "produced",
+            "nested",
+            "nested_list",
+            "nested_dict",
+            "nested_dict_list",
+        }
+    },
     # Title is set through json_schema_extra, so it comes first.
     "name": {"title": "Name", "type": "string", "description": "Display name"},
-    "nested": _SCRAPY_NESTED_JSON_SCHEMA,
-    "nested_list": {
-        "type": "array",
-        "items": _SCRAPY_NESTED_JSON_SCHEMA,
-    },
-    "nested_dict": {
-        "type": "object",
-        "additionalProperties": _SCRAPY_NESTED_JSON_SCHEMA,
-    },
-    "nested_dict_list": {
-        "type": "array",
-        "items": {
-            "type": "object",
-            "additionalProperties": _SCRAPY_NESTED_JSON_SCHEMA,
-        },
-    },
+    **_nested_properties("ScrapySubclassedItemJsonSchemaNested"),
     # No type, since none was specified in json_schema_extra.
     "produced": {},
 }
@@ -420,6 +459,7 @@ class TestScrapySubclassedItem(NonDictTestMixin):
         "type": "object",
         "additionalProperties": False,
         "properties": _SCRAPY_JSON_SCHEMA_PROPERTIES,
+        "$defs": _SCRAPY_BASE["$defs"],
     }
 
     def test_get_value_keyerror_item_dict(self):
@@ -429,8 +469,8 @@ class TestScrapySubclassedItem(NonDictTestMixin):
             adapter["name"]
 
 
-_PYDANTIC_NESTED_JSON_SCHEMA = {
-    k: v for k, v in _NESTED_JSON_SCHEMA.items() if k != "additionalProperties"
+_PYDANTIC_NESTED_DEFINITION = {
+    k: v for k, v in _NESTED_DEFINITION.items() if k != "additionalProperties"
 }
 
 
@@ -444,8 +484,10 @@ class TestPydanticModel(NonDictTestMixin):
     expected_json_schema = {
         **{
             k: v
-            for k, v in NonDictTestMixin.expected_json_schema.items()
-            if k != "additionalProperties"
+            for k, v in _make_expected_json_schema(
+                "PydanticModelJsonSchemaNested", _PYDANTIC_NESTED_DEFINITION
+            ).items()
+            if k not in {"additionalProperties", "properties", "required", "$defs"}
         },
         "properties": {
             **{
@@ -453,24 +495,12 @@ class TestPydanticModel(NonDictTestMixin):
                 for k, v in NonDictTestMixin.expected_json_schema["properties"].items()
                 if k not in {"nested", "nested_list", "nested_dict", "nested_dict_list"}
             },
-            "nested": _PYDANTIC_NESTED_JSON_SCHEMA,
-            "nested_list": {
-                "type": "array",
-                "items": _PYDANTIC_NESTED_JSON_SCHEMA,
-            },
-            "nested_dict": {
-                "type": "object",
-                "additionalProperties": _PYDANTIC_NESTED_JSON_SCHEMA,
-            },
-            "nested_dict_list": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "additionalProperties": _PYDANTIC_NESTED_JSON_SCHEMA,
-                },
-            },
+            **_nested_properties("PydanticModelJsonSchemaNested"),
         },
         "required": NonDictTestMixin.expected_json_schema["required"],
+        "$defs": {
+            "PydanticModelJsonSchemaNested": _PYDANTIC_NESTED_DEFINITION,
+        },
     }
 
     def test_get_field_meta_defined_fields(self):
@@ -509,6 +539,26 @@ class TestDataClassItem(NonDictTestMixin):
     }
 
 
+def _attrs_expected_json_schema(nested_name):
+    """Attrs item classes use the same property order as dataclasses, with a
+    attrs-specific $defs name."""
+    base = _make_expected_json_schema(nested_name)
+    return {
+        **base,
+        "properties": {
+            **{
+                k: v
+                for k, v in base["properties"].items()
+                if k not in {"value", "produced"}
+            },
+            "name": {"title": "Name", "type": "string", "description": "Display name"},
+            "value": base["properties"]["value"],
+            "produced": base["properties"]["produced"],
+        },
+        "required": base["required"],
+    }
+
+
 @requires_attrs
 class TestAttrsItem(NonDictTestMixin):
     item_class = AttrsItem
@@ -516,7 +566,7 @@ class TestAttrsItem(NonDictTestMixin):
     item_class_subclassed = AttrsItemSubclassed
     item_class_empty = AttrsItemEmpty
     item_class_json_schema = AttrsItemJsonSchema
-    expected_json_schema = TestDataClassItem.expected_json_schema
+    expected_json_schema = _attrs_expected_json_schema("AttrsItemJsonSchemaNested")
 
 
 @requires_attrs
@@ -526,4 +576,4 @@ class TestAttrsClassicItem(NonDictTestMixin):
     item_class_subclassed = AttrsClassicItemSubclassed
     item_class_empty = AttrsClassicItemEmpty
     item_class_json_schema = AttrsClassicItemJsonSchema
-    expected_json_schema = TestDataClassItem.expected_json_schema
+    expected_json_schema = _attrs_expected_json_schema("AttrsClassicItemJsonSchemaNested")

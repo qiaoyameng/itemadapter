@@ -1,5 +1,18 @@
 # Changelog
 
+### (unreleased)
+
+`get_json_schema()` now represents reusable item classes with `$defs` and
+`$ref` instead of inlining them, so self-referencing and mutually referencing
+item classes produce a finite schema. Each distinct identity, including
+generic aliases such as `Box[int]` versus `Box[str]`, gets its own definition,
+and same-named classes from different modules no longer override each other.
+Forward references are resolved against an explicit namespace when provided
+through the new `globalns` and `localns` keyword arguments, and unresolvable
+references raise a `ValueError` naming the field path instead of silently
+producing an empty schema. The `$defs` registry is built per call, so repeated
+exports are stable and no naming information leaks between calls.
+
 ### 0.14.0 (2026-10-29)
 
 Removed support for Python 3.9 and 3.10, and added support for Python 3.15

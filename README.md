@@ -228,7 +228,7 @@ The returned value is taken from the following sources, depending on the item ty
 Return a list with the names of all the fields defined for the item class.
 If an item class doesn't support defining fields upfront, None is returned.
 
-#### class method `get_json_schema(item_class: type) -> dict[str, Any]`
+#### class method `get_json_schema(item_class: type, *, globalns=None, localns=None) -> dict[str, Any]`
 
 Return a dict with a [JSON Schema](https://json-schema.org/) representation of
 the item class.
@@ -236,6 +236,14 @@ the item class.
 The generated JSON Schema reflects field type hints, attribute docstrings and
 class and field metadata of any supported item class. It also supports using
 item classes in field types of other item classes.
+
+Reusable item classes are not inlined every time they appear: each distinct
+item class (or generic alias, e.g. `Box[int]` vs `Box[str]`) is defined once
+under a top-level `$defs` object and referenced with `$ref`. This keeps the
+output finite when item classes reference each other, including
+self-references and mutually referencing classes. The `$defs` registry is
+built per call, so repeated exports are identical and no naming information is
+shared between calls.
 
 For example, given:
 
@@ -270,19 +278,28 @@ class Product:
         "brand": {
             "anyOf": [
                 {"type": "null"},
-                {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {"name": {"type": "string"}},
-                    "required": ["name"],
-                },
+                {"$ref": "#/$defs/Brand"},
             ]
         },
         "in_stock": {"default": True, "type": "boolean"},
     },
     "required": ["name", "brand"],
+    "$defs": {
+        "Brand": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+        },
+    },
 }
 ```
+
+The optional `globalns` and `localns` keyword arguments provide the
+namespaces used to resolve forward references in type hints. By default the
+namespace of the module where the item class is defined is used. A forward
+reference that cannot be resolved raises a `ValueError` that names the field
+path, instead of producing an empty schema.
 
 You can also extend or override JSON Schema data at the item class or field
 level:
@@ -337,10 +354,9 @@ itemadapter:
     of JSON Schema where possible, and silently ignored where not, e.g. when
     they are case-insensitive or multiline.
 
--   Recursion is silently ignored: if you have an item class that has an
-    attribute with that same item class as a type or as part of its type, a
-    simple `{"type": "object"}` is used to map the nested instances of that
-    item class.
+-   Recursive and mutually recursive item classes are supported through
+    `$defs` and `$ref`, but only for item classes. Types that itemadapter
+    cannot map to an item class still map to no JSON Schema type.
 
 #### `get_field_meta(field_name: str) -> MappingProxyType`
 
