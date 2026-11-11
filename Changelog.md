@@ -1,5 +1,16 @@
 # Changelog
 
+### 0.15.0 (unreleased)
+
+Added `ItemAdapter.copy_with()`, which returns a copy of the wrapped item with
+the given changes applied, without ever modifying the original item. Changes
+can target top-level fields or nested values through paths of `str` field
+names and `int` indices that traverse items, dictionaries and sequences, and
+`itemadapter.MISSING` can be used as a value to remove a mapping key or a
+sequence element. Only the branches that hold a change are rebuilt, through
+the item constructor, so validation and defaults behave as usual, while
+unchanged branches keep their identity.
+
 ### 0.14.0 (2026-10-29)
 
 Removed support for Python 3.9 and 3.10, and added support for Python 3.15

@@ -3,11 +3,12 @@ from __future__ import annotations
 import dataclasses
 import warnings
 from abc import ABCMeta, abstractmethod
-from collections.abc import Iterable, Iterator, KeysView, MutableMapping
+from collections.abc import Iterable, Iterator, KeysView, Mapping, MutableMapping, Sequence
 from functools import lru_cache
 from types import MappingProxyType
 from typing import Any, ClassVar, cast
 
+from itemadapter._copy import PathComponent, copy_with as _copy_with
 from itemadapter._imports import _is_typeddict, _scrapy_item_classes, attrs
 from itemadapter._json_schema import (
     _json_schema_from_attrs,
@@ -484,6 +485,26 @@ class ItemAdapter(MutableMapping[str, Any]):
         than calling `dict(adapter)`: it's applied recursively to nested items (if there are any).
         """
         return {key: self._asdict(value) for key, value in self.items()}
+
+    def copy_with(
+        self,
+        *,
+        path_changes: Mapping[Sequence[PathComponent], Any] | None = None,
+        **field_changes: Any,
+    ) -> Any:
+        """Return a copy of the wrapped item with the given changes applied.
+
+        The wrapped item is never modified. Branches that hold a change are
+        rebuilt through the item constructor, so validation and defaults
+        behave as usual, while unchanged branches keep their identity.
+
+        Use keyword arguments to change top-level fields, and ``path_changes``
+        to change nested values: its keys are paths of ``str`` field names and
+        ``int`` indices that traverse items, dictionaries and sequences. Use
+        :data:`itemadapter.MISSING` as a value to remove a mapping key or a
+        sequence element instead of replacing it.
+        """
+        return _copy_with(self.item, path_changes=path_changes, **field_changes)
 
     @classmethod
     def _asdict(cls, obj: object) -> object:

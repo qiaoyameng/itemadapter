@@ -357,6 +357,57 @@ with the names of all the defined fields for the item.
 Return a `dict` object with the contents of the adapter. This works slightly different than
 calling `dict(adapter)`, because it's applied recursively to nested items (if there are any).
 
+#### `copy_with(*, path_changes: Mapping | None = None, **field_changes: Any) -> Any`
+
+Return a copy of the wrapped item with the given changes applied. The wrapped
+item is never modified, which makes this method useful for frozen
+`dataclass` and `attrs` models, where in-place changes through
+`adapter[field] = value` are not possible.
+
+Use keyword arguments to change top-level fields, and `path_changes` to
+change nested values. The keys of `path_changes` are paths: tuples of `str`
+field names and `int` indices that traverse items, dictionaries and
+sequences. Use `itemadapter.MISSING` as a value to remove a mapping key or a
+sequence element instead of replacing it.
+
+```python
+>>> import attrs
+>>> from itemadapter import ItemAdapter, MISSING
+>>> @attrs.frozen
+... class Chapter:
+...     title: str
+...     tags: tuple = ()
+>>> @attrs.frozen
+... class Book:
+...     chapter: Chapter
+...     notes: dict
+>>> book = Book(Chapter("Intro", ("a", "b")), {"draft": True})
+>>> new_book = ItemAdapter(book).copy_with(
+...     path_changes={
+...         ("chapter", "title"): "Foreword",
+...         ("chapter", "tags", 0): "z",
+...         ("notes", "draft"): MISSING,
+...     }
+... )
+>>> new_book
+Book(chapter=Chapter(title='Foreword', tags=('z', 'b')), notes={})
+>>> book
+Book(chapter=Chapter(title='Intro', tags=('a', 'b')), notes={'draft': True})
+```
+
+Only the branches that hold a change are rebuilt, through the item
+constructor, so validation and defaults behave as usual, while unchanged
+branches keep their identity. In the example above, `new_book.notes` is a new
+dictionary, but the elements of `new_book.chapter.tags` that were not changed
+are the same objects as in `book.chapter.tags`.
+
+Paths are fully validated before any rebuilding happens: unknown fields,
+read-only computed attributes, out-of-range indices and illegal deletions
+(e.g. removing a field of an item) raise immediately, and if the item
+constructor raises while rebuilding (e.g. a validation error), the original
+item is left untouched. Fields declared with `init=False` cannot be changed
+this way, since they cannot be passed to the item constructor.
+
 
 ### function `itemadapter.utils.is_item(obj: Any) -> bool`
 
