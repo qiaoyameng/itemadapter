@@ -357,6 +357,38 @@ with the names of all the defined fields for the item.
 Return a `dict` object with the contents of the adapter. This works slightly different than
 calling `dict(adapter)`, because it's applied recursively to nested items (if there are any).
 
+#### `copy_with(path: Iterable[str | int], value: Any) -> Any`
+
+Return a new item with the value at the given nested path replaced by
+`value`, leaving the wrapped item unchanged. `path` is an iterable of string
+field names and integer indices that may traverse supported items,
+dictionaries and sequences, e.g. `("parent", "children", 0, "name")`.
+
+Only the branches along the path are rebuilt, through the regular
+constructors (so validation still runs), while untouched branches keep their
+identity. This makes it possible to "modify" frozen
+[dataclass](https://docs.python.org/3/library/dataclasses.html) and
+[attrs](https://www.attrs.org/) items, which do not support in-place
+assignment:
+
+```python
+>>> from dataclasses import dataclass
+>>> from itemadapter import ItemAdapter
+>>> @dataclass(frozen=True)
+... class Item:
+...     name: str
+...     tags: tuple
+>>> item = Item(name="foo", tags=("a", "b"))
+>>> new_item = ItemAdapter(item).copy_with(("tags", 0), "z")
+>>> new_item
+Item(name='foo', tags=('z', 'b'))
+>>> item  # the original item is unchanged
+Item(name='foo', tags=('a', 'b'))
+```
+
+If `value` is not provided, the key at the given path is deleted instead,
+which is only supported for dictionary keys.
+
 
 ### function `itemadapter.utils.is_item(obj: Any) -> bool`
 

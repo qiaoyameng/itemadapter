@@ -1,5 +1,13 @@
 # Changelog
 
+### Unreleased
+
+Added `ItemAdapter.copy_with()`, which returns a new item with a value at a
+nested path (string field names and integer indices through items, dicts and
+sequences) replaced, rebuilding only the affected branches through the
+regular constructors and leaving the original item unchanged. This enables
+"modifying" frozen dataclass and attrs items.
+
 ### 0.14.0 (2026-10-29)
 
 Removed support for Python 3.9 and 3.10, and added support for Python 3.15

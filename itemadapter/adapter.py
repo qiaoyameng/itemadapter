@@ -8,6 +8,7 @@ from functools import lru_cache
 from types import MappingProxyType
 from typing import Any, ClassVar, cast
 
+from itemadapter._copy_with import _UNSET, copy_with
 from itemadapter._imports import _is_typeddict, _scrapy_item_classes, attrs
 from itemadapter._json_schema import (
     _json_schema_from_attrs,
@@ -484,6 +485,23 @@ class ItemAdapter(MutableMapping[str, Any]):
         than calling `dict(adapter)`: it's applied recursively to nested items (if there are any).
         """
         return {key: self._asdict(value) for key, value in self.items()}
+
+    def copy_with(self, path: Iterable[str | int], value: Any = _UNSET) -> Any:
+        """Return a new item with the value at the given nested path replaced
+        by ``value``, leaving the wrapped item unchanged.
+
+        ``path`` is an iterable of string field names and integer indices
+        that may traverse supported items, dictionaries and sequences, e.g.
+        ``("parent", "children", 0, "name")``. Only the branches along the
+        path are rebuilt, through the regular constructors (so validation
+        still runs), while untouched branches keep their identity. This makes
+        it possible to "modify" frozen dataclass and attrs items, which do
+        not support in-place assignment.
+
+        If ``value`` is not provided, the key at the given path is deleted
+        instead, which is only supported for dictionary keys.
+        """
+        return copy_with(self.item, path, value)
 
     @classmethod
     def _asdict(cls, obj: object) -> object:
