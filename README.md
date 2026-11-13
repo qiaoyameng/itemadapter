@@ -146,6 +146,47 @@ but it doesn't traverse the object recursively converting nested items:
 >>>
 ```
 
+### Controlling the export scope
+
+Some items carry expensive attributes or fields meant for internal use only.
+The `itemadapter.export` module provides an independent export strategy
+interface that lets callers decide, for each field, whether it is kept,
+excluded or explicitly masked, based on field metadata and its structured
+path within the object.
+
+Decisions are made *before* a field value is read, so the getter of an
+excluded (or masked) field is never evaluated. Nested items, dictionaries and
+sequences share the same path context, and the priority between rules is
+fixed: exclusion wins over masking, which wins over keeping.
+
+```python
+>>> from dataclasses import dataclass, field
+>>> from itemadapter import ItemAdapter, RuleExportStrategy
+>>> @dataclass
+... class Account:
+...     owner: str
+...     password: str = field(metadata={"export": "secret"})
+...     internal_note: str = field(metadata={"export": "internal"})
+...     tags: list = field(default_factory=lambda: ["a", "b"])
+>>> strategy = RuleExportStrategy(
+...     exclude_metadata={"internal"},
+...     mask_metadata={"secret"},
+...     mask_paths=[("tags", 1)],
+... )
+>>> ItemAdapter(Account("alice", "hunter2", "note", ["a", "b"])).export(strategy)
+{'owner': 'alice', 'password': '<redacted>', 'tags': ['a', '<redacted>']}
+>>>
+```
+
+The `redact` callback only receives the approved field context (path, field
+name, metadata and item class), never the original value, and error messages
+report the offending path and type without including the value itself.
+Unsupported types and reference cycles raise an `ExportError` carrying the
+structured path where the problem was found.
+
+The strategy only affects the returned dict: the wrapped item is not
+modified, and a later plain `asdict()` call still returns the full contents.
+
 ---
 
 ## API reference
@@ -356,6 +397,38 @@ with the names of all the defined fields for the item.
 
 Return a `dict` object with the contents of the adapter. This works slightly different than
 calling `dict(adapter)`, because it's applied recursively to nested items (if there are any).
+
+#### `export(strategy: ExportStrategy) -> dict`
+
+Return a `dict` built from the adapter following an independent
+[export strategy](#module-itemadapterexport). Excluded fields are decided on
+before their values are read (so their getters never run), masked fields are
+replaced through the strategy's `redact` callback without reading the original
+value, and nested items, dictionaries and sequences share one structured path
+context. The wrapped item is left untouched; calling `asdict()` afterwards is
+unaffected by the strategy.
+
+### Module `itemadapter.export`
+
+* `export(obj, strategy)`: module-level equivalent of
+  `ItemAdapter.export()`, accepting any supported item, adapter or container.
+* `ExportStrategy`: `Protocol` with `decide(context)` returning an
+  `ExportDecision` (`KEEP`, `EXCLUDE` or `MASK`) and `redact(context)`
+  returning the replacement for a masked field.
+* `BaseExportStrategy`: convenience base class that keeps every sequence
+  element by default and only requires `decide()` and `redact()`.
+* `RuleExportStrategy`: built-in strategy combining path rules
+  (`include_paths`, `exclude_paths`, `mask_paths`) and metadata rules
+  (`include_metadata`, `exclude_metadata`, `mask_metadata`, keyed by
+  `metadata_key`). Exclusion always wins over masking, which wins over
+  keeping.
+* `ExportPath`, `FieldSegment` and `IndexSegment`: the structured path shared
+  across nested items, dictionaries and sequences.
+* `FieldContext`: what a strategy receives for each field — path, field name,
+  metadata and item class — with no access to the field value.
+* `ExportError`: raised for unsupported types, non-string dictionary keys or
+  reference cycles; carries the offending `ExportPath` and never includes the
+  offending value in its message.
 
 
 ### function `itemadapter.utils.is_item(obj: Any) -> bool`

@@ -1,5 +1,18 @@
 # Changelog
 
+### Unreleased
+
+Added the `itemadapter.export` module, an independent export strategy
+interface. `ItemAdapter.export()` and the `itemadapter.export.export()`
+function walk nested items, dictionaries and sequences with a shared
+structured path context and let a strategy keep, exclude or mask each field
+from its metadata and path. Exclusion and masking are decided before the
+field value is read, so excluded getters are never evaluated; masking goes
+through a `redact` callback that never receives the original value.
+Unsupported types, non-string dictionary keys and reference cycles raise
+`ExportError` with the offending path and no raw value. The wrapped item is
+not modified, and the strategy does not affect later `asdict()` calls.
+
 ### 0.14.0 (2026-10-29)
 
 Removed support for Python 3.9 and 3.10, and added support for Python 3.15

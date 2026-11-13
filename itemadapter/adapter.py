@@ -6,7 +6,7 @@ from abc import ABCMeta, abstractmethod
 from collections.abc import Iterable, Iterator, KeysView, MutableMapping
 from functools import lru_cache
 from types import MappingProxyType
-from typing import Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from itemadapter._imports import _is_typeddict, _scrapy_item_classes, attrs
 from itemadapter._json_schema import (
@@ -25,6 +25,9 @@ from itemadapter._utils import (
     _is_attrs_class,
     _is_pydantic_model,
 )
+
+if TYPE_CHECKING:
+    from itemadapter.export import ExportStrategy
 
 __all__ = [
     "AdapterInterface",
@@ -484,6 +487,19 @@ class ItemAdapter(MutableMapping[str, Any]):
         than calling `dict(adapter)`: it's applied recursively to nested items (if there are any).
         """
         return {key: self._asdict(value) for key, value in self.items()}
+
+    def export(self, strategy: ExportStrategy) -> dict[str, Any]:
+        """Return a dict built from this adapter following an export strategy.
+
+        The strategy decides, from each field's metadata and structured path,
+        whether a field is kept, excluded or explicitly masked. Decisions are
+        made before field values are read, so excluded getters never run. The
+        wrapped item is not modified, and calling :meth:`asdict` afterwards
+        still returns the full, unfiltered contents.
+        """
+        from itemadapter.export import export as _export
+
+        return _export(self, strategy)
 
     @classmethod
     def _asdict(cls, obj: object) -> object:
