@@ -146,6 +146,93 @@ but it doesn't traverse the object recursively converting nested items:
 >>>
 ```
 
+### Exporting and restoring object graphs
+
+`asdict()` copies every nested object, so two fields that point to the same
+object become two independent values, and reference cycles make it recurse
+endlessly. For those cases, `itemadapter` provides a separate graph format
+that keeps object identity explicit. The regular `asdict()` behavior is
+unchanged.
+
+The format is plain JSON data: only JSON scalars (`str`, `int`, `float`,
+`bool`, `None`), `list`, `dict` and registered item models are supported.
+Tuples, sets and other objects raise `GraphFormatError` on export.
+
+```python
+>>> from dataclasses import dataclass
+>>> from itemadapter import build_item_registry, graph_from_item, item_from_graph
+>>> @dataclass
+... class Child:
+...     name: str
+...     back: object = None
+>>> @dataclass
+... class Parent:
+...     child: Child
+...     other: Child
+>>>
+```
+
+```python
+>>> shared = Child("shared")
+>>> parent = Parent(shared, shared)
+>>> document = graph_from_item(parent)
+>>> document["nodes"]
+[{'id': '1', 'type': 'Child', 'fields': {'name': 'shared', 'back': None}}, {'id': '0', 'type': 'Parent', 'fields': {'child': {'$ref': '1'}, 'other': {'$ref': '1'}}}]
+>>> registry = build_item_registry([Parent, Child])
+>>> restored = item_from_graph(document, registry)
+>>> restored.child is restored.other
+True
+>>>
+```
+
+Every item, `dict` and `list` is exported once as a node carrying a unique
+string `id`; every other occurrence is a `{"$ref": "<id>"}` reference, which
+also allows reference cycles (including list back-edges) to round-trip.
+
+#### Document layout and versioning
+
+The document is a dict with three keys:
+
+* `version`: format version, currently `1`
+* `nodes`: a list of node objects, each one `{"id", "type", "fields"}`.
+  Built-in container nodes use the reserved type names `"dict"` and `"list"`;
+  item nodes use the type name from the caller-supplied registry
+* `root`: a `{"$ref": "<id>"}` reference to the root node
+
+Forward-compatibility rules:
+
+* The major `version` is authoritative: a document whose `version` is not
+  supported is rejected, never partially parsed
+* Unknown top-level keys, node keys and field keys may be added by later
+  minor revisions and must be ignored by older readers; the keys documented
+  above keep their meaning
+* The reserved `$ref` marker and the `"dict"`/`"list"` type names are part of
+  the format. User dict keys starting with `$` are escaped on export (a second
+  `$` prefix) and unescaped on restore, so they can never be mistaken for a
+  reference
+
+#### Restore safety
+
+`item_from_graph()` only accepts model types from the `registry` argument,
+built with `build_item_registry()`. Type names are looked up in that registry;
+module or class names found in the payload are never imported dynamically.
+
+All validation happens before any item is constructed, so an invalid document
+raises `GraphRestorationError` without returning a half-built object. The
+checks cover:
+
+* duplicate node ids
+* dangling references, including references nested inside fields or lists
+* unknown item types and malformed reference markers
+* a node budget (`max_nodes`)
+* cycles made entirely of frozen items
+
+Mutable cycles are restored in two phases: empty instances are created first,
+then their fields are patched in. A frozen item cannot be patched after
+construction, so any cycle that contains only frozen items cannot be built and
+is rejected up front. A cycle that includes at least one mutable item is still
+restorable.
+
 ---
 
 ## API reference
@@ -356,6 +443,41 @@ with the names of all the defined fields for the item.
 
 Return a `dict` object with the contents of the adapter. This works slightly different than
 calling `dict(adapter)`, because it's applied recursively to nested items (if there are any).
+Shared nested objects are copied independently and reference cycles are not supported;
+use the graph functions below when object identity or cycles matter.
+
+
+### Graph export/restore functions
+
+#### `itemadapter.graph_from_item(root) -> dict`
+
+Export the item `root` and every item, `dict` and `list` reachable from it as
+a JSON-serializable graph document. Shared objects are exported once and
+reused through `{"$ref": "<id>"}` references, so object identity and reference
+cycles are preserved. Raises `GraphFormatError` for unsupported values or
+non-item roots.
+
+#### `itemadapter.build_item_registry(item_classes, *, frozen=()) -> dict`
+
+Build the registry used by `item_from_graph()`. Accepts an iterable of item
+classes (their `__name__` is used as the type name) or a mapping of explicit
+type names to classes. Frozen classes are detected automatically for
+dataclasses, attrs classes and pydantic models; classes whose frozenness
+cannot be introspected can be listed in `frozen`.
+
+#### `item_from_graph(document, registry, *, max_nodes=None) -> Any`
+
+Restore an item from a graph document using only the types in `registry`;
+nothing is imported from the payload. Duplicate ids, dangling references,
+unknown types, marker misuse, oversized graphs and all-frozen cycles raise
+`GraphRestorationError` before any object is constructed. `max_nodes` limits
+the number of nodes that may be restored.
+
+#### `itemadapter.GRAPH_FORMAT_VERSION`
+
+The integer version of the graph format produced and accepted by this
+release. `GraphError` is the common base class of `GraphFormatError` and
+`GraphRestorationError`.
 
 
 ### function `itemadapter.utils.is_item(obj: Any) -> bool`

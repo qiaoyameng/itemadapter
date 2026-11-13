@@ -1,5 +1,26 @@
 # Changelog
 
+### Unreleased
+
+Added a separate JSON graph export/restore format that preserves object
+identity and supports reference cycles, alongside the unchanged
+`ItemAdapter.asdict()` behavior (which still copies shared items and cannot
+handle cycles).
+
+* `itemadapter.graph_from_item()` exports an item and every reachable item,
+  dict and list as a versioned document (`GRAPH_FORMAT_VERSION`) made only of
+  JSON scalars, lists and dicts. Each object is exported once with an explicit
+  string id; other occurrences use `{"$ref": "<id>"}` references.
+* `itemadapter.build_item_registry()` builds the caller-supplied type
+  registry, and `itemadapter.item_from_graph()` restores a document using only
+  the registered types. Types are never imported from module names in the
+  payload.
+* Restoration validates duplicate ids, dangling references, unknown types,
+  malformed markers and a node budget (`max_nodes`) before constructing any
+  object, so failures never return half-built items. Cycles made entirely of
+  frozen items are rejected up front; cycles with at least one mutable item are
+  restored through two-phase construction.
+
 ### 0.14.0 (2026-10-29)
 
 Removed support for Python 3.9 and 3.10, and added support for Python 3.15
