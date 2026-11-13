@@ -47,6 +47,18 @@ class TypedDictItemSubclass(TypedDictItemBase, total=False):
     optional: str
 
 
+_TYPED_DICT_ITEM_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "name": {"type": "string", "description": "Display name"},
+        "value": {"minimum": 0, "type": "integer"},
+    },
+    "required": ["name", "value"],
+}
+_TYPED_DICT_ITEM_REF = "#/$defs/tests.test_adapter_typed_dict.TypedDictItem"
+
+
 class TestTypedDict:
     def test_is_item_class(self):
         assert ItemAdapter.is_item_class(TypedDictItem)
@@ -110,19 +122,14 @@ class TestTypedDict:
             "type": "object",
             "additionalProperties": False,
             "properties": {
-                "nested": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "name": {"type": "string", "description": "Display name"},
-                        "value": {"minimum": 0, "type": "integer"},
-                    },
-                    "required": ["name", "value"],
-                },
+                "nested": {"$ref": _TYPED_DICT_ITEM_REF},
                 "tags": {"type": "array", "items": {"type": "string"}},
                 "brand": {"type": ["null", "string"]},
             },
             "required": ["nested", "tags", "brand"],
+            "$defs": {
+                "tests.test_adapter_typed_dict.TypedDictItem": _TYPED_DICT_ITEM_SCHEMA,
+            },
         }
         check_schemas(actual, expected)
 
@@ -165,11 +172,20 @@ class TestTypedDict:
 
     def test_json_schema_recursion(self):
         actual = ItemAdapter.get_json_schema(TypedDictItemRecursive)
+        recursive_ref = "#/$defs/tests.test_adapter_typed_dict.TypedDictItemRecursive"
         expected = {
             "type": "object",
             "additionalProperties": False,
-            "properties": {"child": {"type": "object"}},
+            "properties": {"child": {"$ref": recursive_ref}},
             "required": ["child"],
+            "$defs": {
+                "tests.test_adapter_typed_dict.TypedDictItemRecursive": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {"child": {"$ref": recursive_ref}},
+                    "required": ["child"],
+                },
+            },
         }
         check_schemas(actual, expected)
 
@@ -305,18 +321,11 @@ class TestTypedDictCrossNesting:
         expected = {
             "type": "object",
             "additionalProperties": False,
-            "properties": {
-                "nested": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "name": {"type": "string", "description": "Display name"},
-                        "value": {"minimum": 0, "type": "integer"},
-                    },
-                    "required": ["name", "value"],
-                }
-            },
+            "properties": {"nested": {"$ref": _TYPED_DICT_ITEM_REF}},
             "required": ["nested"],
+            "$defs": {
+                "tests.test_adapter_typed_dict.TypedDictItem": _TYPED_DICT_ITEM_SCHEMA,
+            },
         }
         check_schemas(actual, expected)
 
@@ -329,18 +338,13 @@ class TestTypedDictCrossNesting:
                 "nested": {
                     "anyOf": [
                         {"type": "null"},
-                        {
-                            "type": "object",
-                            "additionalProperties": False,
-                            "properties": {
-                                "name": {"type": "string", "description": "Display name"},
-                                "value": {"minimum": 0, "type": "integer"},
-                            },
-                            "required": ["name", "value"],
-                        },
+                        {"$ref": _TYPED_DICT_ITEM_REF},
                     ]
                 }
             },
             "required": ["nested"],
+            "$defs": {
+                "tests.test_adapter_typed_dict.TypedDictItem": _TYPED_DICT_ITEM_SCHEMA,
+            },
         }
         check_schemas(actual, expected)

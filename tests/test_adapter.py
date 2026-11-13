@@ -227,6 +227,61 @@ _NESTED_JSON_SCHEMA = {
 }
 
 
+def _non_dict_expected_with_definitions(nested_class_name):
+    nested_ref = f"#/$defs/tests.{nested_class_name}"
+    return {
+        "llmHint": "Hi model!",
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            # Title is set through json_schema_extra, so it comes first.
+            "name": {"title": "Name", "type": "string", "description": "Display name"},
+            "color": {
+                "type": "string",
+                "enum": ["red", "green", "blue"],
+            },
+            "answer": {
+                "type": ["null", "number", "string"],
+            },
+            "numbers": {"type": "array", "items": {"type": "number"}},
+            "aliases": {
+                "type": "object",
+                "additionalProperties": {"type": "string"},
+            },
+            "nested": {"$ref": nested_ref},
+            "nested_list": {
+                "type": "array",
+                "items": {"$ref": nested_ref},
+            },
+            "nested_dict": {
+                "type": "object",
+                "additionalProperties": {"$ref": nested_ref},
+            },
+            "nested_dict_list": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": {"$ref": nested_ref},
+                },
+            },
+            "value": {"default": None},
+            "produced": {"type": "boolean"},
+        },
+        "required": [
+            "name",
+            "color",
+            "answer",
+            "numbers",
+            "aliases",
+            "nested",
+            "nested_list",
+            "nested_dict",
+            "nested_dict_list",
+        ],
+        "$defs": {f"tests.{nested_class_name}": _NESTED_JSON_SCHEMA},
+    }
+
+
 class NonDictTestMixin(BaseTestMixin):
     item_class_subclassed = None
     item_class_empty = None
@@ -489,24 +544,9 @@ class TestDataClassItem(NonDictTestMixin):
     item_class_subclassed = DataClassItemSubclassed
     item_class_empty = DataClassItemEmpty
     item_class_json_schema = DataClassItemJsonSchema
-    expected_json_schema = {
-        **NonDictTestMixin.expected_json_schema,
-        "properties": {
-            **{
-                k: v
-                for k, v in NonDictTestMixin.expected_json_schema["properties"].items()
-                if k not in {"value", "produced"}
-            },
-            # Title is set through json_schema_extra, so it comes first.
-            "name": {"title": "Name", "type": "string", "description": "Display name"},
-            # value and produced come last because they have a default value,
-            # and dataclass does not support values without a default after
-            # values with a default.
-            "value": NonDictTestMixin.expected_json_schema["properties"]["value"],
-            "produced": NonDictTestMixin.expected_json_schema["properties"]["produced"],
-        },
-        "required": NonDictTestMixin.expected_json_schema["required"],
-    }
+    expected_json_schema = _non_dict_expected_with_definitions(
+        "DataClassItemJsonSchemaNested"
+    )
 
 
 @requires_attrs
@@ -516,7 +556,7 @@ class TestAttrsItem(NonDictTestMixin):
     item_class_subclassed = AttrsItemSubclassed
     item_class_empty = AttrsItemEmpty
     item_class_json_schema = AttrsItemJsonSchema
-    expected_json_schema = TestDataClassItem.expected_json_schema
+    expected_json_schema = _non_dict_expected_with_definitions("AttrsItemJsonSchemaNested")
 
 
 @requires_attrs
@@ -526,4 +566,6 @@ class TestAttrsClassicItem(NonDictTestMixin):
     item_class_subclassed = AttrsClassicItemSubclassed
     item_class_empty = AttrsClassicItemEmpty
     item_class_json_schema = AttrsClassicItemJsonSchema
-    expected_json_schema = TestDataClassItem.expected_json_schema
+    expected_json_schema = _non_dict_expected_with_definitions(
+        "AttrsClassicItemJsonSchemaNested"
+    )

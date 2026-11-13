@@ -247,28 +247,36 @@ class TestJsonSchema:
 
     def test_recursion(self):
         actual = ItemAdapter.get_json_schema(RecursionItem)
+        root_ref = "#/$defs/tests.test_json_schema.RecursionItem"
+        nested_ref = "#/$defs/tests.test_json_schema.RecursionNestedItem"
         expected = {
             "type": "object",
             "additionalProperties": False,
             "properties": {
-                "child": {
+                "child": {"$ref": nested_ref},
+                "sibling": {"$ref": root_ref},
+            },
+            "required": ["child", "sibling"],
+            "$defs": {
+                "tests.test_json_schema.RecursionItem": {
                     "type": "object",
                     "additionalProperties": False,
                     "properties": {
-                        "parent": {
-                            "type": "object",
-                        },
-                        "sibling": {
-                            "type": "object",
-                        },
+                        "child": {"$ref": nested_ref},
+                        "sibling": {"$ref": root_ref},
+                    },
+                    "required": ["child", "sibling"],
+                },
+                "tests.test_json_schema.RecursionNestedItem": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "parent": {"$ref": root_ref},
+                        "sibling": {"$ref": nested_ref},
                     },
                     "required": ["parent", "sibling"],
                 },
-                "sibling": {
-                    "type": "object",
-                },
             },
-            "required": ["child", "sibling"],
         }
         check_schemas(actual, expected)
 
@@ -292,6 +300,7 @@ class TestJsonSchema:
 
     def test_optional_item_list(self):
         actual = ItemAdapter.get_json_schema(OptionalItemListItem)
+        nested_ref = "#/$defs/tests.test_json_schema.OptionalItemListNestedItem"
         expected = {
             "type": "object",
             "additionalProperties": False,
@@ -303,19 +312,22 @@ class TestJsonSchema:
                         },
                         {
                             "type": "array",
-                            "items": {
-                                "type": "object",
-                                "additionalProperties": False,
-                                "properties": {
-                                    "is_nested": {
-                                        "type": "boolean",
-                                        "default": True,
-                                    },
-                                },
-                            },
+                            "items": {"$ref": nested_ref},
                         },
                     ],
                     "default": None,
+                },
+            },
+            "$defs": {
+                "tests.test_json_schema.OptionalItemListNestedItem": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "is_nested": {
+                            "type": "boolean",
+                            "default": True,
+                        },
+                    },
                 },
             },
         }
@@ -540,6 +552,7 @@ class TestJsonSchema:
             in_stock: bool = True
 
         actual = ItemAdapter.get_json_schema(Product)
+        brand_ref = "#/$defs/tests.test_json_schema.Brand"
         expected = {
             "type": "object",
             "additionalProperties": False,
@@ -548,17 +561,20 @@ class TestJsonSchema:
                 "brand": {
                     "anyOf": [
                         {"type": "null"},
-                        {
-                            "type": "object",
-                            "additionalProperties": False,
-                            "properties": {"name": {"type": "string"}},
-                            "required": ["name"],
-                        },
+                        {"$ref": brand_ref},
                     ]
                 },
                 "in_stock": {"type": "boolean", "default": True},
             },
             "required": ["name", "brand"],
+            "$defs": {
+                "tests.test_json_schema.Brand": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {"name": {"type": "string"}},
+                    "required": ["name"],
+                },
+            },
         }
         check_schemas(actual, expected)
 
@@ -701,13 +717,16 @@ class TestCrossNesting:
             "type": "object",
             "additionalProperties": False,
             "properties": {
-                "nested": {
+                "nested": {"$ref": "#/$defs/tests.AttrsItemJsonSchemaNested"},
+            },
+            "$defs": {
+                "tests.AttrsItemJsonSchemaNested": {
                     "type": "object",
                     "additionalProperties": False,
                     "properties": {
                         "is_nested": {"type": "boolean", "default": True},
                     },
-                }
+                },
             },
         }
         check_schemas(actual, expected)
@@ -729,7 +748,11 @@ class TestCrossNesting:
         expected = {
             "type": "object",
             "properties": {
-                "nested": {
+                "nested": {"$ref": "#/$defs/tests.DataClassItemJsonSchemaNested"},
+            },
+            "required": ["nested"],
+            "$defs": {
+                "tests.DataClassItemJsonSchemaNested": {
                     "type": "object",
                     "additionalProperties": False,
                     "properties": {
@@ -737,7 +760,6 @@ class TestCrossNesting:
                     },
                 },
             },
-            "required": ["nested"],
         }
         check_schemas(actual, expected)
 
@@ -817,6 +839,8 @@ class TestJsonSchemaEdgeCase:
         """Unions keep the declaration order of their members, and only get a
         leading entry for their simple types if they have any."""
         actual = ItemAdapter.get_json_schema(MultiItemUnionItem)
+        brand_ref = "#/$defs/tests.test_json_schema.Brand"
+        nested_ref = "#/$defs/tests.test_json_schema.OptionalItemListNestedItem"
         brand_schema = {
             "type": "object",
             "additionalProperties": False,
@@ -832,8 +856,14 @@ class TestJsonSchemaEdgeCase:
             "type": "object",
             "additionalProperties": False,
             "properties": {
-                "either": {"anyOf": [brand_schema, nested_schema]},
-                "or_none": {"anyOf": [{"type": "null"}, brand_schema, nested_schema]},
+                "either": {"anyOf": [{"$ref": brand_ref}, {"$ref": nested_ref}]},
+                "or_none": {
+                    "anyOf": [
+                        {"type": "null"},
+                        {"$ref": brand_ref},
+                        {"$ref": nested_ref},
+                    ]
+                },
                 "containers": {
                     "anyOf": [
                         {"type": "array", "items": {"type": "integer"}},
@@ -842,6 +872,10 @@ class TestJsonSchemaEdgeCase:
                 },
             },
             "required": ["either", "or_none", "containers"],
+            "$defs": {
+                "tests.test_json_schema.Brand": brand_schema,
+                "tests.test_json_schema.OptionalItemListNestedItem": nested_schema,
+            },
         }
         check_schemas(actual, expected)
 

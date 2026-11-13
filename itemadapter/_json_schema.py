@@ -5,25 +5,29 @@ import dataclasses
 import inspect
 import operator
 import re
+import sys
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from collections.abc import Set as AbstractSet
-from copy import copy
+from copy import copy, deepcopy
 from enum import Enum
 from functools import lru_cache
 from textwrap import dedent
 from types import MappingProxyType, UnionType
 from typing import (
     TYPE_CHECKING,
+    Annotated,
     Any,
+    ForwardRef,
+    Literal,
     Protocol,
+    TypeVar,
     Union,
     get_args,
     get_origin,
-    get_type_hints,
     runtime_checkable,
 )
 
-from ._imports import PydanticUndefined, _get_type_hints, attrs
+from ._imports import PydanticUndefined, _get_type_hints, _is_typeddict, attrs
 from ._utils import _split_typed_dict_hint
 
 if TYPE_CHECKING:
@@ -41,6 +45,63 @@ SIMPLE_TYPES = {
 }
 
 
+class JsonSchemaError(NameError, ValueError):
+    """Raised when the type hints of an item class cannot be resolved."""
+
+
+_JsonSchemaIdentity = tuple[type, tuple[Any, ...]]
+
+
+class _DefinitionRegistry:
+    """Definitions and names for one get_json_schema() call.
+
+    Keeping this state per call makes definition names deterministic and
+    prevents a model exported earlier from influencing a later export.
+    """
+
+    def __init__(self) -> None:
+        self.definitions: dict[_JsonSchemaIdentity, str] = {}
+        self.names: dict[str, _JsonSchemaIdentity] = {}
+        self.schemas: dict[str, dict[str, Any]] = {}
+        self.bodies: dict[_JsonSchemaIdentity, dict[str, Any]] = {}
+        self.referenced: set[_JsonSchemaIdentity] = set()
+        self.building: set[_JsonSchemaIdentity] = set()
+        self.root: _JsonSchemaIdentity | None = None
+
+    def add(self, identity: _JsonSchemaIdentity) -> str:
+        name = self.definitions.get(identity)
+        if name is not None:
+            return name
+        base_name = _definition_base_name(identity)
+        name = base_name
+        suffix = 2
+        while name in self.names and self.names[name] != identity:
+            name = f"{base_name}__{suffix}"
+            suffix += 1
+        self.definitions[identity] = name
+        self.names[name] = identity
+        self.schemas[name] = {}
+        return name
+
+    def set_body(self, identity: _JsonSchemaIdentity, body: dict[str, Any]) -> None:
+        self.bodies[identity] = body
+        name = self.add(identity)
+        self.schemas[name].update(deepcopy(body))
+
+    def finish(self, root_schema: dict[str, Any]) -> None:
+        if self.root is None:
+            return
+        root_name = self.add(self.root)
+        if self.root in self.referenced:
+            self.set_body(self.root, root_schema)
+        else:
+            self.schemas.pop(root_name, None)
+            self.names.pop(root_name, None)
+        if self.schemas:
+            defs = root_schema.setdefault("$defs", {})
+            defs.update(self.schemas)
+
+
 @dataclasses.dataclass
 class _JsonSchemaState:
     adapter: type[ItemAdapter | AdapterInterface]
@@ -53,7 +114,272 @@ class _JsonSchemaState:
     """
     containers: set[type] = dataclasses.field(default_factory=set)
     """Used to keep track of item classes that are being processed, to avoid
-    recursion."""
+    recursion when their schemas are inlined."""
+    definitions: _DefinitionRegistry = dataclasses.field(default_factory=_DefinitionRegistry)
+    namespace: Mapping[str, Any] = dataclasses.field(default_factory=dict)
+    """Extra names used to resolve forward references."""
+
+
+def _item_type_parts(item_class: Any) -> tuple[type, tuple[Any, ...]]:
+    if get_origin(item_class) is Annotated:
+        item_class = get_args(item_class)[0]
+    origin = get_origin(item_class)
+    if origin is not None and isinstance(origin, type):
+        return origin, get_args(item_class)
+    if isinstance(item_class, type):
+        return item_class, ()
+    raise JsonSchemaError(f"{item_class!r} is not an item class")
+
+
+def _type_identity_key(type_hint: Any) -> Any:
+    if isinstance(type_hint, TypeVar):
+        return ("typevar", type_hint)
+    origin = get_origin(type_hint)
+    if origin is not None:
+        return (origin, tuple(_type_identity_key(arg) for arg in get_args(type_hint)))
+    if isinstance(type_hint, ForwardRef):
+        return ("forwardref", type_hint.__forward_arg__)
+    try:
+        hash(type_hint)
+    except TypeError:
+        return ("repr", repr(type_hint))
+    return type_hint
+
+
+def _item_identity(item_class: Any) -> _JsonSchemaIdentity:
+    origin, args = _item_type_parts(item_class)
+    return origin, tuple(_type_identity_key(arg) for arg in args)
+
+
+def _display_type(type_hint: Any) -> str:
+    if isinstance(type_hint, TypeVar):
+        return type_hint.__name__
+    if type_hint is Ellipsis:
+        return "ellipsis"
+    if type_hint is None or type_hint is type(None):
+        return "none"
+    origin = get_origin(type_hint)
+    if origin is not None:
+        args = get_args(type_hint)
+        if origin in UNION_TYPES:
+            return "_or_".join(_display_type(arg) for arg in args)
+        origin_name = _display_type(origin)
+        return f"{origin_name}_{'_'.join(_display_type(arg) for arg in args)}"
+    if isinstance(type_hint, type):
+        if type_hint.__module__ == "builtins":
+            return type_hint.__qualname__
+        return f"{type_hint.__module__}.{type_hint.__qualname__}"
+    return repr(type_hint)
+
+
+def _definition_base_name(identity: _JsonSchemaIdentity) -> str:
+    origin, args = identity
+    name = f"{origin.__module__}.{origin.__qualname__}"
+    if args:
+        name = f"{name}_{'_'.join(_display_type(arg) for arg in args)}"
+    return re.sub(r"[^0-9A-Za-z_.-]", "_", name)
+
+
+def _definition_ref(name: str) -> dict[str, str]:
+    escaped_name = name.replace("~", "~0").replace("/", "~1")
+    return {"$ref": f"#/$defs/{escaped_name}"}
+
+
+def _type_namespace(
+    item_class: type, extra_namespace: Mapping[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    module = sys.modules.get(item_class.__module__)
+    global_namespace = dict(vars(module)) if module is not None else {}
+    global_namespace.update(extra_namespace)
+    local_namespace = dict(global_namespace)
+    for base in reversed(item_class.__mro__):
+        local_namespace.update(vars(base))
+    for type_param in getattr(item_class, "__type_params__", ()):
+        local_namespace[type_param.__name__] = type_param
+    local_namespace[item_class.__name__] = item_class
+    local_namespace[item_class.__qualname__.rsplit(".", maxsplit=1)[-1]] = item_class
+    return global_namespace, local_namespace
+
+
+def _raw_annotations(item_class: type) -> dict[str, Any]:
+    annotations: dict[str, Any] = {}
+    for base in reversed(item_class.__mro__):
+        annotations.update(getattr(base, "__annotations__", {}))
+    return annotations
+
+
+def _evaluate_hint(
+    hint: Any,
+    global_namespace: Mapping[str, Any],
+    local_namespace: Mapping[str, Any],
+) -> Any:
+    from typing import _eval_type  # noqa: PLC0415
+
+    if isinstance(hint, str):
+        hint = ForwardRef(hint)
+    try:
+        return _eval_type(hint, global_namespace, local_namespace, ())
+    except TypeError as exc:
+        if "positional argument" not in str(exc) and "type_params" not in str(exc):
+            raise
+        return _eval_type(hint, global_namespace, local_namespace)
+
+
+def _resolve_type_hints(
+    item_class: type,
+    state: _JsonSchemaState,
+    *,
+    include_extras: bool = False,
+) -> dict[str, Any]:
+    global_namespace, local_namespace = _type_namespace(item_class, state.namespace)
+    try:
+        return _get_type_hints(
+            item_class,
+            globalns=global_namespace,
+            localns=local_namespace,
+            include_extras=include_extras,
+        )
+    except Exception as exc:
+        for field_name, hint in _raw_annotations(item_class).items():
+            try:
+                _evaluate_hint(hint, global_namespace, local_namespace)
+            except Exception as field_exc:
+                field_path = f"{item_class.__module__}.{item_class.__qualname__}.{field_name}"
+                raise JsonSchemaError(
+                    f"Cannot resolve the type hint for field {field_path}: {field_exc}"
+                ) from exc
+        raise JsonSchemaError(
+            f"Cannot resolve type hints for "
+            f"{item_class.__module__}.{item_class.__qualname__}: {exc}"
+        ) from exc
+
+
+def _resolve_field_type(
+    item_class: type,
+    field_name: str,
+    type_hint: Any,
+    state: _JsonSchemaState,
+) -> Any:
+    if type_hint is None:
+        return type_hint
+    global_namespace, local_namespace = _type_namespace(item_class, state.namespace)
+    try:
+        return _evaluate_hint(type_hint, global_namespace, local_namespace)
+    except Exception as exc:
+        field_path = f"{item_class.__module__}.{item_class.__qualname__}.{field_name}"
+        raise JsonSchemaError(
+            f"Cannot resolve the type hint for field {field_path}: {exc}"
+        ) from exc
+
+
+def _typevar_mapping(item_class: type, type_args: tuple[Any, ...]) -> dict[TypeVar, Any]:
+    return dict(zip(getattr(item_class, "__parameters__", ()), type_args))
+
+
+def _substitute_typevars(type_hint: Any, mapping: Mapping[TypeVar, Any]) -> Any:
+    if not mapping:
+        return type_hint
+    if isinstance(type_hint, TypeVar):
+        return mapping.get(type_hint, type_hint)
+    origin = get_origin(type_hint)
+    if origin is None:
+        return type_hint
+    args = get_args(type_hint)
+    if origin is Literal:
+        return type_hint
+    if origin is Annotated:
+        base_type = _substitute_typevars(args[0], mapping)
+        return Annotated[(base_type, *args[1:])]
+    new_args = tuple(_substitute_typevars(arg, mapping) for arg in args)
+    if new_args == args:
+        return type_hint
+    if origin in UNION_TYPES:
+        return Union[new_args]  # noqa: UP007
+    try:
+        return origin[new_args[0]] if len(new_args) == 1 else origin[new_args]
+    except TypeError:
+        copy_with = getattr(type_hint, "copy_with", None)
+        if copy_with is not None:
+            return copy_with(new_args)
+        return type_hint
+
+
+def _adapter_for_item_class(
+    item_class: Any, state: _JsonSchemaState
+) -> type[AdapterInterface] | None:
+    try:
+        origin, _ = _item_type_parts(item_class)
+    except JsonSchemaError:
+        return None
+    get_adapter_class = getattr(state.adapter, "_get_adapter_class", None)
+    if get_adapter_class is not None:
+        try:
+            return get_adapter_class(origin)
+        except TypeError:
+            return None
+    if state.adapter.is_item_class(origin):
+        return state.adapter
+    return None
+
+
+def _definition_adapter(item_class: Any, state: _JsonSchemaState) -> type[AdapterInterface] | None:
+    from .adapter import AttrsAdapter, DataclassAdapter, DictAdapter  # noqa: PLC0415
+
+    try:
+        origin, _ = _item_type_parts(item_class)
+    except JsonSchemaError:
+        return None
+    adapter = _adapter_for_item_class(item_class, state)
+    if adapter is None:
+        return None
+    if issubclass(adapter, DataclassAdapter) and dataclasses.is_dataclass(origin):
+        return adapter
+    if issubclass(adapter, AttrsAdapter) and attrs is not None and attrs.has(origin):
+        return adapter
+    if issubclass(adapter, DictAdapter) and _is_typeddict(origin):
+        return adapter
+    return None
+
+
+def _schema_from_item_class(item_class: Any, state: _JsonSchemaState) -> dict[str, Any]:
+    return state.adapter.get_json_schema(item_class, _state=state)
+
+
+def _ensure_definition(item_class: Any, state: _JsonSchemaState) -> dict[str, str]:
+    identity = _item_identity(item_class)
+    registry = state.definitions
+    name = registry.add(identity)
+    registry.referenced.add(identity)
+    if identity not in registry.bodies and identity not in registry.building:
+        registry.building.add(identity)
+        try:
+            body = _schema_from_item_class(item_class, state)
+        finally:
+            registry.building.discard(identity)
+        registry.set_body(identity, body)
+    return _definition_ref(name)
+
+
+def _begin_json_schema(
+    adapter: type[ItemAdapter | AdapterInterface],
+    item_class: Any,
+    namespace: Mapping[str, Any] | None = None,
+) -> _JsonSchemaState:
+    state = _JsonSchemaState(adapter=adapter, namespace=dict(namespace or {}))
+    root_identity = _item_identity(item_class)
+    state.definitions.root = root_identity
+    state.definitions.add(root_identity)
+    state.definitions.building.add(root_identity)
+    return state
+
+
+def _finish_json_schema(schema: dict[str, Any], state: _JsonSchemaState) -> None:
+    registry = state.definitions
+    if registry.root is None:
+        return
+    registry.bodies[registry.root] = schema
+    registry.building.discard(registry.root)
+    registry.finish(schema)
 
 
 def dedupe_types(types: Sequence[Any]) -> list[Any]:
@@ -364,9 +690,33 @@ def update_prop_from_origin(
 
 def update_prop_from_type(prop: dict[str, Any], prop_type: Any, state: _JsonSchemaState) -> None:
     if (origin := get_origin(prop_type)) is not None:
+        if origin is Annotated:
+            update_prop_from_type(prop, get_args(prop_type)[0], state)
+            return
+        definition_adapter = _definition_adapter(prop_type, state)
+        if definition_adapter is not None:
+            prop.setdefault("$ref", _ensure_definition(prop_type, state)["$ref"])
+            return
+        if (
+            _adapter_for_item_class(prop_type, state) is not None
+            and not issubclass(origin, (Sequence, Mapping, AbstractSet))
+        ):
+            item_class, _ = _item_type_parts(prop_type)
+            if item_class in state.containers:
+                prop.setdefault("type", "object")
+                return
+            state.containers.add(item_class)
+            subschema = state.adapter.get_json_schema(prop_type, _state=state)
+            state.containers.remove(item_class)
+            for key, value in subschema.items():
+                prop.setdefault(key, value)
+            return
         update_prop_from_origin(prop, origin, prop_type, state)
         return
     if isinstance(prop_type, type):
+        if _definition_adapter(prop_type, state) is not None:
+            prop.setdefault("$ref", _ensure_definition(prop_type, state)["$ref"])
+            return
         if state.adapter.is_item_class(prop_type):
             if prop_type in state.containers:
                 prop.setdefault("type", "object")
@@ -408,7 +758,7 @@ def _setdefault_attribute_types_on_json_schema(
     for any matching JSON Schema property that has no type set, set the type
     based on the type hint."""
     props = schema.get("properties", {})
-    attribute_type_hints = get_type_hints(item_class)
+    attribute_type_hints = _resolve_type_hints(item_class, state)
     for prop_name, prop in props.items():
         if prop_name not in attribute_type_hints:
             continue
@@ -538,12 +888,14 @@ def update_required_fields(
 
 
 def _json_schema_from_attrs(item_class: type, state: _JsonSchemaState) -> dict[str, Any]:
-    schema = base_json_schema_from_item_class(item_class)
-    fields = attrs.fields(item_class)
+    origin, type_args = _item_type_parts(item_class)
+    schema = base_json_schema_from_item_class(origin)
+    fields = attrs.fields(origin)
     if not fields:
         return schema
 
-    attrs.resolve_types(item_class)  # Ensure field.type annotations are resolved
+    resolved_field_types = _resolve_type_hints(origin, state)
+    typevar_mapping = _typevar_mapping(origin, type_args)
 
     schema["properties"] = {
         field.name: copy(field.metadata.get("json_schema_extra", {})) for field in fields
@@ -551,24 +903,28 @@ def _json_schema_from_attrs(item_class: type, state: _JsonSchemaState) -> dict[s
     default_factory_fields: set[str] = set()
     for field in fields:
         prop = schema["properties"][field.name]
-        _update_attrs_prop(prop, field, state, default_factory_fields)
+        field_type = resolved_field_types.get(field.name, field.type)
+        field_type = _substitute_typevars(field_type, typevar_mapping)
+        field_type = _resolve_field_type(origin, field.name, field_type, state)
+        _update_attrs_prop(prop, field, field_type, state, default_factory_fields)
     update_required_fields(schema, default_factory_fields)
-    _setdefault_attribute_docstrings_on_json_schema(schema, item_class)
+    _setdefault_attribute_docstrings_on_json_schema(schema, origin)
     return schema
 
 
 def _update_attrs_prop(
     prop: dict[str, Any],
     field: Attribute[Any],
+    field_type: Any,
     state: _JsonSchemaState,
     default_factory_fields: set[str],
 ) -> None:
-    update_prop_from_type(prop, field.type, state)
+    update_prop_from_type(prop, field_type, state)
     if isinstance(field.default, attrs.Factory):
         default_factory_fields.add(field.name)
     elif field.default is not attrs.NOTHING:
         prop.setdefault("default", field.default)
-    _update_attrs_prop_validation(prop, field)
+    _update_attrs_prop_validation(prop, field, field_type)
 
 
 ATTRS_NUMBER_VALIDATORS = {
@@ -582,6 +938,7 @@ ATTRS_NUMBER_VALIDATORS = {
 def _update_attrs_prop_validation(
     prop: dict[str, Any],
     field: Attribute[Any],
+    field_type: Any,
 ) -> None:
     if not field.validator:
         return
@@ -599,10 +956,10 @@ def _update_attrs_prop_validation(
         elif validator_type_name == "_InValidator":
             prop.setdefault("enum", list(validator.options))
         elif validator_type_name == "_MinLengthValidator":
-            key = "minLength" if field.type is str else "minItems"
+            key = "minLength" if field_type is str else "minItems"
             prop.setdefault(key, validator.min_length)
         elif validator_type_name == "_MaxLengthValidator":
-            key = "maxLength" if field.type is str else "maxItems"
+            key = "maxLength" if field_type is str else "maxItems"
             prop.setdefault(key, validator.max_length)
         elif validator_type_name == "_MatchesReValidator":
             pattern = json_schema_pattern(validator.pattern)
@@ -612,17 +969,21 @@ def _update_attrs_prop_validation(
 
 
 def _json_schema_from_typed_dict(item_class: type, state: _JsonSchemaState) -> dict[str, Any]:
-    schema = base_json_schema_from_item_class(item_class)
-    type_hints = _get_type_hints(item_class)
+    origin, type_args = _item_type_parts(item_class)
+    schema = base_json_schema_from_item_class(origin)
+    type_hints = _resolve_type_hints(origin, state)
     if not type_hints:
         return schema
-    extra_type_hints = _get_type_hints(item_class, include_extras=True)
+    extra_type_hints = _resolve_type_hints(origin, state, include_extras=True)
+    typevar_mapping = _typevar_mapping(origin, type_args)
     schema["properties"] = {}
     required = []
-    required_keys = item_class.__required_keys__  # type: ignore[attr-defined]
+    required_keys = origin.__required_keys__  # type: ignore[attr-defined]
     for field_name, field_type in type_hints.items():
         field_metadata, field_required = _split_typed_dict_hint(extra_type_hints[field_name])
         prop = copy(field_metadata.get("json_schema_extra", {}))
+        field_type = _substitute_typevars(field_type, typevar_mapping)
+        field_type = _resolve_field_type(origin, field_name, field_type, state)
         update_prop_from_type(prop, field_type, state)
         schema["properties"][field_name] = prop
         if field_required is None:
@@ -631,14 +992,16 @@ def _json_schema_from_typed_dict(item_class: type, state: _JsonSchemaState) -> d
             required.append(field_name)
     if required:
         schema.setdefault("required", required)
-    _setdefault_attribute_docstrings_on_json_schema(schema, item_class)
+    _setdefault_attribute_docstrings_on_json_schema(schema, origin)
     return schema
 
 
 def _json_schema_from_dataclass(item_class: type, state: _JsonSchemaState) -> dict[str, Any]:
-    schema = base_json_schema_from_item_class(item_class)
-    fields = dataclasses.fields(item_class)
-    resolved_field_types = get_type_hints(item_class)
+    origin, type_args = _item_type_parts(item_class)
+    schema = base_json_schema_from_item_class(origin)
+    fields = dataclasses.fields(origin)
+    resolved_field_types = _resolve_type_hints(origin, state)
+    typevar_mapping = _typevar_mapping(origin, type_args)
     default_factory_fields = set()
     if fields:
         schema["properties"] = {
@@ -646,13 +1009,16 @@ def _json_schema_from_dataclass(item_class: type, state: _JsonSchemaState) -> di
         }
         for field in fields:
             prop = schema["properties"][field.name]
-            update_prop_from_type(prop, resolved_field_types.get(field.name), state)
+            field_type = resolved_field_types.get(field.name)
+            field_type = _substitute_typevars(field_type, typevar_mapping)
+            field_type = _resolve_field_type(origin, field.name, field_type, state)
+            update_prop_from_type(prop, field_type, state)
             if field.default_factory is not dataclasses.MISSING:
                 default_factory_fields.add(field.name)
             elif field.default is not dataclasses.MISSING:
                 prop.setdefault("default", field.default)
         update_required_fields(schema, default_factory_fields)
-    _setdefault_attribute_docstrings_on_json_schema(schema, item_class)
+    _setdefault_attribute_docstrings_on_json_schema(schema, origin)
     return schema
 
 

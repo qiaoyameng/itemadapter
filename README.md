@@ -235,7 +235,17 @@ the item class.
 
 The generated JSON Schema reflects field type hints, attribute docstrings and
 class and field metadata of any supported item class. It also supports using
-item classes in field types of other item classes.
+item classes in field types of other item classes. Reusable nested item classes
+are stored under `$defs` and referenced with `$ref`; this includes recursive
+models and parameterized generic models, where each distinct combination of
+model class and generic arguments gets its own definition.
+
+Definition names are module-qualified, so classes with the same name in
+different modules do not shadow each other. Forward references are resolved
+against the definition module and an optional `namespace` mapping passed as a
+keyword argument to `get_json_schema()`. If a forward reference cannot be
+resolved, a `JsonSchemaError` identifies the affected model field instead of
+silently emitting an empty schema.
 
 For example, given:
 
@@ -270,17 +280,20 @@ class Product:
         "brand": {
             "anyOf": [
                 {"type": "null"},
-                {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {"name": {"type": "string"}},
-                    "required": ["name"],
-                },
+                {"$ref": "#/$defs/__main__.Brand"},
             ]
         },
         "in_stock": {"default": True, "type": "boolean"},
     },
     "required": ["name", "brand"],
+    "$defs": {
+        "__main__.Brand": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+        },
+    },
 }
 ```
 
@@ -337,10 +350,8 @@ itemadapter:
     of JSON Schema where possible, and silently ignored where not, e.g. when
     they are case-insensitive or multiline.
 
--   Recursion is silently ignored: if you have an item class that has an
-    attribute with that same item class as a type or as part of its type, a
-    simple `{"type": "object"}` is used to map the nested instances of that
-    item class.
+-   `$defs`/`$ref` output is currently generated for dataclass, attrs and
+    `TypedDict` item classes. Other supported item classes are still inlined.
 
 #### `get_field_meta(field_name: str) -> MappingProxyType`
 

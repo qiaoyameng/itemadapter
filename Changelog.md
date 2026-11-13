@@ -1,5 +1,17 @@
 # Changelog
 
+### Unreleased
+
+`get_json_schema()` now stores reusable nested dataclass, attrs and `TypedDict`
+item classes in `$defs` and references them with `$ref`, including recursive
+models and parameterized generics. Definitions are named per export, include
+the model module and generic arguments in their identity, and no longer leave
+global naming state behind between exports.
+
+Forward references are resolved against the model module and an optional
+`namespace` mapping. Unresolved references now raise an error that includes the
+affected field path instead of producing an empty schema.
+
 ### 0.14.0 (2026-10-29)
 
 Removed support for Python 3.9 and 3.10, and added support for Python 3.15
