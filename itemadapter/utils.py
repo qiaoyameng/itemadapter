@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from itemadapter.adapter import ItemAdapter
@@ -18,7 +19,13 @@ def is_item(obj: object) -> bool:
     return ItemAdapter.is_item(obj)
 
 
-def get_field_meta_from_class(item_class: type, field_name: str) -> MappingProxyType[str, Any]:
+def get_field_meta_from_class(
+    item_class: type,
+    field_name: str,
+    *,
+    aliases: Mapping[str, str] | None = None,
+    alias_map: Mapping[str, str] | None = None,
+) -> MappingProxyType[str, Any]:
     """Return a read-only mapping with metadata for the given field name, within the given
     item class. If there is no metadata for the field, or the item class does not support
     field metadata, an empty object is returned.
@@ -32,4 +39,6 @@ def get_field_meta_from_class(item_class: type, field_name: str) -> MappingProxy
     The returned value is an instance of types.MappingProxyType, i.e. a dynamic read-only view
     of the original mapping, which gets automatically updated if the original mapping changes.
     """
-    return ItemAdapter.get_field_meta_from_class(item_class, field_name)
+    return ItemAdapter.get_field_meta_from_class(
+        item_class, field_name, aliases=aliases, alias_map=alias_map
+    )

@@ -146,6 +146,61 @@ but it doesn't traverse the object recursively converting nested items:
 >>>
 ```
 
+### Field aliases
+
+`ItemAdapter` can expose item fields under a different name without changing
+the field names of the wrapped object. Aliases come from the `"alias"` entry in
+field metadata (for item types that support metadata) or from a caller-provided
+mapping:
+
+```python
+>>> from dataclasses import dataclass, field
+>>> from itemadapter import ItemAdapter
+>>> @dataclass
+... class Product:
+...     product_id: str = field(metadata={"alias": "sku"})
+...     stock: int = 0
+...
+>>> item = Product("abc")
+>>> adapter = ItemAdapter(item)
+>>> adapter["sku"]
+'abc'
+>>> adapter["sku"] = "xyz"
+>>> item.product_id
+'xyz'
+>>> adapter.asdict()
+{'sku': 'xyz', 'stock': 0}
+>>>
+```
+
+Caller aliases use the same `field name -> alias` direction and can also be
+requested with `alias_map`:
+
+```python
+>>> adapter = ItemAdapter({"product_id": "abc"}, aliases={"product_id": "sku"})
+>>> adapter.asdict()
+{'sku': 'abc'}
+>>>
+```
+
+`adapter.alias_view(mapping)` (or `adapter.with_aliases(mapping)`) creates
+another view over the same item. Aliases apply consistently to item access,
+`field_names()`, `asdict()` and `ItemAdapter.get_json_schema()`:
+
+```python
+>>> ItemAdapter.get_json_schema(Product)["properties"].keys()
+dict_keys(['sku', 'stock'])
+>>>
+```
+
+A renamed field is only reachable through its alias; its original name is
+rejected just like any other unknown field. Unknown fields, duplicate aliases,
+and aliases that collide with the public name of another field raise
+`AliasError` before the wrapped item is read or modified. Nested items use
+their own field metadata (and their own caller mapping, if any); a parent
+mapping is not propagated to nested objects. Items without alias metadata keep
+their original names.
+
 ---
 
 ## API reference

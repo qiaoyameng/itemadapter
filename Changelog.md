@@ -1,5 +1,15 @@
 # Changelog
 
+### (unreleased)
+
+Added explicit field alias views to `ItemAdapter`. Aliases can be declared in
+field metadata with the `"alias"` key or supplied by callers with
+`ItemAdapter(item, aliases={...})`, `alias_map={...}` or `alias_view()`.
+Aliases are shared by item access, `field_names()`, `asdict()` and
+`get_json_schema()`. Unknown fields, duplicate aliases and collisions with
+unrenamed fields raise `AliasError` before the item is read or modified.
+Nested items use their own aliases.
+
 ### 0.14.0 (2026-10-29)
 
 Removed support for Python 3.9 and 3.10, and added support for Python 3.15

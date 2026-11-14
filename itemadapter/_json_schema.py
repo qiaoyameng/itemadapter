@@ -23,6 +23,12 @@ from typing import (
     runtime_checkable,
 )
 
+from ._aliases import (
+    AliasNamespace,
+    alias_from_metadata,
+    apply_aliases_to_schema,
+    resolve_aliases,
+)
 from ._imports import PydanticUndefined, _get_type_hints, attrs
 from ._utils import _split_typed_dict_hint
 
@@ -497,8 +503,25 @@ def base_json_schema_from_item_class(item_class: type) -> dict[str, Any]:
     return schema
 
 
+def _metadata_alias_namespace(
+    field_names: Sequence[str], metadata: Mapping[str, Mapping[str, Any]]
+) -> AliasNamespace | None:
+    aliases = {
+        field_name: alias
+        for field_name in field_names
+        if (alias := alias_from_metadata(metadata.get(field_name))) is not None
+    }
+    if not aliases:
+        return None
+    return resolve_aliases(field_names, metadata_aliases=aliases)
+
+
 def _json_schema_from_item_class(
-    adapter: type[AdapterInterface], item_class: type, state: _JsonSchemaState | None = None
+    adapter: type[AdapterInterface],
+    item_class: type,
+    state: _JsonSchemaState | None = None,
+    *,
+    _apply_aliases: bool = True,
 ) -> dict[str, Any]:
     state = state or _JsonSchemaState(adapter=adapter, containers={item_class})
     schema = base_json_schema_from_item_class(item_class)
@@ -519,6 +542,10 @@ def _json_schema_from_item_class(
     ]
     if required:
         schema.setdefault("required", required)
+    if _apply_aliases:
+        apply_aliases_to_schema(
+            schema, _metadata_alias_namespace(list(fields_meta), fields_meta)
+        )
     return schema
 
 
@@ -554,6 +581,13 @@ def _json_schema_from_attrs(item_class: type, state: _JsonSchemaState) -> dict[s
         _update_attrs_prop(prop, field, state, default_factory_fields)
     update_required_fields(schema, default_factory_fields)
     _setdefault_attribute_docstrings_on_json_schema(schema, item_class)
+    apply_aliases_to_schema(
+        schema,
+        _metadata_alias_namespace(
+            [field.name for field in fields],
+            {field.name: field.metadata for field in fields},
+        ),
+    )
     return schema
 
 
@@ -619,9 +653,11 @@ def _json_schema_from_typed_dict(item_class: type, state: _JsonSchemaState) -> d
     extra_type_hints = _get_type_hints(item_class, include_extras=True)
     schema["properties"] = {}
     required = []
+    field_metadata_by_name: dict[str, Mapping[str, Any]] = {}
     required_keys = item_class.__required_keys__  # type: ignore[attr-defined]
     for field_name, field_type in type_hints.items():
         field_metadata, field_required = _split_typed_dict_hint(extra_type_hints[field_name])
+        field_metadata_by_name[field_name] = field_metadata
         prop = copy(field_metadata.get("json_schema_extra", {}))
         update_prop_from_type(prop, field_type, state)
         schema["properties"][field_name] = prop
@@ -632,6 +668,9 @@ def _json_schema_from_typed_dict(item_class: type, state: _JsonSchemaState) -> d
     if required:
         schema.setdefault("required", required)
     _setdefault_attribute_docstrings_on_json_schema(schema, item_class)
+    apply_aliases_to_schema(
+        schema, _metadata_alias_namespace(list(type_hints), field_metadata_by_name)
+    )
     return schema
 
 
@@ -653,6 +692,13 @@ def _json_schema_from_dataclass(item_class: type, state: _JsonSchemaState) -> di
                 prop.setdefault("default", field.default)
         update_required_fields(schema, default_factory_fields)
     _setdefault_attribute_docstrings_on_json_schema(schema, item_class)
+    apply_aliases_to_schema(
+        schema,
+        _metadata_alias_namespace(
+            [field.name for field in fields],
+            {field.name: field.metadata for field in fields},
+        ),
+    )
     return schema
 
 
@@ -682,6 +728,10 @@ def _json_schema_from_pydantic(
         _update_pydantic_prop(prop, name, metadata, state, default_factory_fields)
     update_required_fields(schema, default_factory_fields)
     _setdefault_attribute_docstrings_on_json_schema(schema, item_class)
+    apply_aliases_to_schema(
+        schema,
+        _metadata_alias_namespace(list(fields), fields),
+    )
     return schema
 
 

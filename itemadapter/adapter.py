@@ -3,11 +3,18 @@ from __future__ import annotations
 import dataclasses
 import warnings
 from abc import ABCMeta, abstractmethod
-from collections.abc import Iterable, Iterator, KeysView, MutableMapping
+from collections.abc import Iterable, Iterator, KeysView, Mapping, MutableMapping
 from functools import lru_cache
 from types import MappingProxyType
 from typing import Any, ClassVar, cast
 
+from itemadapter._aliases import (
+    AliasError,
+    AliasNamespace,
+    alias_from_metadata,
+    apply_aliases_to_schema,
+    resolve_aliases,
+)
 from itemadapter._imports import _is_typeddict, _scrapy_item_classes, attrs
 from itemadapter._json_schema import (
     _json_schema_from_attrs,
@@ -28,6 +35,7 @@ from itemadapter._utils import (
 
 __all__ = [
     "AdapterInterface",
+    "AliasError",
     "AttrsAdapter",
     "DataclassAdapter",
     "DictAdapter",
@@ -335,10 +343,28 @@ class ScrapyItemAdapter(_MixinDictScrapyItemAdapter, AdapterInterface):
         cls, item_class: type, *, _state: _JsonSchemaState | None = None
     ) -> dict[str, Any]:
         _state = _state or _JsonSchemaState(adapter=cls, containers={item_class})
-        schema = super().get_json_schema(item_class, _state=_state)
+        schema = _json_schema_from_item_class(
+            cls, item_class, _state, _apply_aliases=False
+        )
         _setdefault_attribute_types_on_json_schema(schema, item_class, _state)
         _setdefault_attribute_docstrings_on_json_schema(schema, item_class)
         schema.pop("required", None)
+        field_names = list(cls.get_field_names_from_class(item_class) or ())
+        fields_meta = {
+            field_name: cls.get_field_meta_from_class(item_class, field_name)
+            for field_name in field_names
+        }
+        metadata_aliases = {
+            field_name: alias
+            for field_name in field_names
+            if (alias := alias_from_metadata(fields_meta[field_name])) is not None
+        }
+        apply_aliases_to_schema(
+            schema,
+            resolve_aliases(field_names, metadata_aliases=metadata_aliases)
+            if metadata_aliases
+            else None,
+        )
         return schema
 
     def field_names(self) -> KeysView[str]:
@@ -380,6 +406,43 @@ def _find_adapter_class(
     return None, _has_item_overrides(adapter_classes)
 
 
+class _ItemAdapterGetJsonSchema:
+    """Expose get_json_schema() on both ItemAdapter classes and alias views."""
+
+    def __get__(self, instance: Any, owner: type[ItemAdapter]) -> Any:
+        def get_json_schema(
+            item_class: type | None = None,
+            *,
+            aliases: Mapping[str, str] | None = None,
+            alias_map: Mapping[str, str] | None = None,
+            allow_original_names: bool = False,
+            _state: _JsonSchemaState | None = None,
+        ) -> dict[str, Any]:
+            if aliases is not None and alias_map is not None:
+                raise TypeError("Pass either aliases or alias_map, not both")
+            if item_class is None:
+                if instance is None:
+                    raise TypeError("get_json_schema() missing required item_class")
+                item_class = instance.item.__class__
+                if (
+                    aliases is None
+                    and alias_map is None
+                    and instance._alias_namespace is not None
+                ):
+                    aliases = dict(instance._alias_namespace.canonical_to_public)
+                if not allow_original_names:
+                    allow_original_names = instance._allow_original_names
+            return owner._get_json_schema(
+                item_class,
+                aliases=aliases,
+                alias_map=alias_map,
+                allow_original_names=allow_original_names,
+                _state=_state,
+            )
+
+        return get_json_schema
+
+
 class ItemAdapter(MutableMapping[str, Any]):
     """Wrapper class to interact with data container objects. It provides a common interface
     to extract and set data without having to take the object's type into account.
@@ -393,7 +456,17 @@ class ItemAdapter(MutableMapping[str, Any]):
         PydanticAdapter,
     )
 
-    def __init__(self, item: Any) -> None:
+    def __init__(
+        self,
+        item: Any,
+        aliases: Mapping[str, str] | None = None,
+        *,
+        alias_map: Mapping[str, str] | None = None,
+        allow_original_names: bool = False,
+    ) -> None:
+        if aliases is not None and alias_map is not None:
+            raise TypeError("Pass either aliases or alias_map, not both")
+        caller_aliases = alias_map if alias_map is not None else aliases
         adapter_classes = tuple(self.ADAPTER_CLASSES)
         adapter_class, item_overrides = _find_adapter_class(adapter_classes, item.__class__)
         if item_overrides:
@@ -408,6 +481,81 @@ class ItemAdapter(MutableMapping[str, Any]):
         if adapter_class is None:
             raise TypeError(f"No adapter found for objects of type: {type(item)} ({item})")
         self.adapter = adapter_class(item)
+        self._allow_original_names = allow_original_names
+        self._alias_namespace = self._build_instance_alias_namespace(
+            caller_aliases, allow_original_names
+        )
+
+    def _build_instance_alias_namespace(
+        self,
+        caller_aliases: Mapping[str, str] | None,
+        allow_original_names: bool = False,
+    ) -> AliasNamespace | None:
+        field_names = list(self.adapter.field_names())
+        metadata_aliases: dict[str, str] = {}
+        for field_name in field_names:
+            try:
+                metadata = self.adapter.get_field_meta_from_class(
+                    self.item.__class__, field_name
+                )
+            except (KeyError, NameError, TypeError):
+                metadata = MappingProxyType({})
+            alias = alias_from_metadata(metadata)
+            if alias is not None:
+                metadata_aliases[field_name] = alias
+        if not metadata_aliases and not caller_aliases:
+            return None
+        return resolve_aliases(
+            field_names,
+            metadata_aliases=metadata_aliases,
+            caller_aliases=caller_aliases,
+            allow_original_names=allow_original_names,
+        )
+
+    @classmethod
+    def _build_class_alias_namespace(
+        cls,
+        item_class: type,
+        caller_aliases: Mapping[str, str] | None,
+        allow_original_names: bool = False,
+    ) -> AliasNamespace | None:
+        adapter_class = cls._get_adapter_class(item_class)
+        field_names = adapter_class.get_field_names_from_class(item_class)
+        if field_names is None:
+            if caller_aliases is None or (
+                issubclass(item_class, dict) and not _is_typeddict(item_class)
+            ):
+                return None
+            return resolve_aliases(
+                (),
+                caller_aliases=caller_aliases,
+                allow_original_names=allow_original_names,
+            )
+        metadata_aliases: dict[str, str] = {}
+        for field_name in field_names:
+            try:
+                metadata = adapter_class.get_field_meta_from_class(item_class, field_name)
+            except (KeyError, NameError, TypeError):
+                metadata = MappingProxyType({})
+            alias = alias_from_metadata(metadata)
+            if alias is not None:
+                metadata_aliases[field_name] = alias
+        if not metadata_aliases and not caller_aliases:
+            return None
+        return resolve_aliases(
+            field_names,
+            metadata_aliases=metadata_aliases,
+            caller_aliases=caller_aliases,
+            allow_original_names=allow_original_names,
+        )
+
+    def _translate_name(self, public_name: str) -> str:
+        if self._alias_namespace is None:
+            return public_name
+        field_name = self._alias_namespace.resolve(public_name)
+        if field_name is None:
+            raise KeyError(public_name)
+        return field_name
 
     @classmethod
     def is_item(cls, item: Any) -> bool:
@@ -430,23 +578,101 @@ class ItemAdapter(MutableMapping[str, Any]):
 
     @classmethod
     def get_field_meta_from_class(
-        cls, item_class: type, field_name: str
+        cls,
+        item_class: type,
+        field_name: str,
+        *,
+        aliases: Mapping[str, str] | None = None,
+        alias_map: Mapping[str, str] | None = None,
     ) -> MappingProxyType[str, Any]:
+        if aliases is not None and alias_map is not None:
+            raise TypeError("Pass either aliases or alias_map, not both")
+        caller_aliases = alias_map if alias_map is not None else aliases
         adapter_class = cls._get_adapter_class(item_class)
+        namespace = cls._build_class_alias_namespace(item_class, caller_aliases)
+        if namespace is not None:
+            resolved_name = namespace.resolve(field_name)
+            if resolved_name is None:
+                raise KeyError(field_name)
+            field_name = resolved_name
         return adapter_class.get_field_meta_from_class(item_class, field_name)
 
     @classmethod
-    def get_field_names_from_class(cls, item_class: type) -> list[str] | None:
+    def get_field_names_from_class(
+        cls,
+        item_class: type,
+        *,
+        aliases: Mapping[str, str] | None = None,
+        alias_map: Mapping[str, str] | None = None,
+        allow_original_names: bool = False,
+    ) -> list[str] | None:
+        if aliases is not None and alias_map is not None:
+            raise TypeError("Pass either aliases or alias_map, not both")
+        caller_aliases = alias_map if alias_map is not None else aliases
         adapter_class = cls._get_adapter_class(item_class)
-        return adapter_class.get_field_names_from_class(item_class)
+        field_names = adapter_class.get_field_names_from_class(item_class)
+        if field_names is None:
+            if caller_aliases is not None:
+                cls._build_class_alias_namespace(item_class, caller_aliases, allow_original_names)
+            return None
+        namespace = cls._build_class_alias_namespace(
+            item_class, caller_aliases, allow_original_names
+        )
+        if namespace is None:
+            return field_names
+        return [namespace.public_name(field_name) for field_name in field_names]
+
+    get_json_schema = _ItemAdapterGetJsonSchema()
 
     @classmethod
-    def get_json_schema(
-        cls, item_class: type, *, _state: _JsonSchemaState | None = None
+    def _get_json_schema(
+        cls,
+        item_class: type,
+        *,
+        aliases: Mapping[str, str] | None = None,
+        alias_map: Mapping[str, str] | None = None,
+        allow_original_names: bool = False,
+        _state: _JsonSchemaState | None = None,
     ) -> dict[str, Any]:
+        if aliases is not None and alias_map is not None:
+            raise TypeError("Pass either aliases or alias_map, not both")
+        caller_aliases = alias_map if alias_map is not None else aliases
+        namespace = cls._build_class_alias_namespace(
+            item_class, caller_aliases, allow_original_names
+        )
         _state = _state or _JsonSchemaState(adapter=cls, containers={item_class})
         adapter_class = cls._get_adapter_class(item_class)
-        return adapter_class.get_json_schema(item_class, _state=_state)
+        schema = adapter_class.get_json_schema(item_class, _state=_state)
+        if namespace is not None and caller_aliases is not None:
+            metadata_namespace = cls._build_class_alias_namespace(item_class, None)
+            cls._remap_schema_names(schema, metadata_namespace, namespace)
+        return schema
+
+    @staticmethod
+    def _remap_schema_names(
+        schema: dict[str, Any],
+        old_namespace: AliasNamespace | None,
+        new_namespace: AliasNamespace,
+    ) -> None:
+        rename_map = {}
+        for field_name in new_namespace.field_names:
+            old_name = (
+                old_namespace.public_name(field_name)
+                if old_namespace is not None
+                else field_name
+            )
+            new_name = new_namespace.public_name(field_name)
+            if old_name != new_name:
+                rename_map[old_name] = new_name
+        if not rename_map:
+            return
+        properties = schema.get("properties")
+        if properties:
+            schema["properties"] = {
+                rename_map.get(name, name): prop for name, prop in properties.items()
+            }
+        if "required" in schema:
+            schema["required"] = [rename_map.get(name, name) for name in schema["required"]]
 
     @property
     def item(self) -> Any:
@@ -457,27 +683,116 @@ class ItemAdapter(MutableMapping[str, Any]):
         return f"<{self.__class__.__name__} for {self.item.__class__.__name__}({values})>"
 
     def __getitem__(self, field_name: str) -> Any:
-        return self.adapter.__getitem__(field_name)
+        return self.adapter.__getitem__(self._translate_name(field_name))
 
     def __setitem__(self, field_name: str, value: Any) -> None:
-        self.adapter.__setitem__(field_name, value)
+        self.adapter.__setitem__(self._translate_name(field_name), value)
 
     def __delitem__(self, field_name: str) -> None:
-        self.adapter.__delitem__(field_name)
+        self.adapter.__delitem__(self._translate_name(field_name))
 
     def __iter__(self) -> Iterator[str]:
-        return self.adapter.__iter__()
+        if self._alias_namespace is None:
+            return self.adapter.__iter__()
+        return self._iter_public_names()
+
+    def _iter_public_names(self) -> Iterator[str]:
+        assert self._alias_namespace is not None
+        namespace = self._alias_namespace
+        for field_name in self.adapter.__iter__():
+            if field_name in namespace.field_names:
+                public_name = namespace.public_name(field_name)
+                yield public_name
+                if (
+                    namespace.allow_original_names
+                    and field_name in namespace.renamed
+                    and field_name != public_name
+                    and namespace.public_to_canonical.get(field_name) == field_name
+                ):
+                    yield field_name
+            else:
+                public_name = namespace.public_name(field_name)
+                if public_name in namespace.public_to_canonical:
+                    raise AliasError(
+                        f"Runtime field {field_name!r} collides with the alias namespace"
+                    )
+                yield public_name
 
     def __len__(self) -> int:
+        if self._alias_namespace is not None and self._alias_namespace.allow_original_names:
+            return sum(1 for _ in self)
         return self.adapter.__len__()
 
     def get_field_meta(self, field_name: str) -> MappingProxyType[str, Any]:
         """Return metadata for the given field name."""
-        return self.adapter.get_field_meta(field_name)
+        return self.adapter.get_field_meta(self._translate_name(field_name))
 
     def field_names(self) -> KeysView[str]:
         """Return read-only key view with the names of all the defined fields for the item."""
+        if self._alias_namespace is not None:
+            return KeysView(
+                MappingProxyType(
+                    {
+                        public_name: field_name
+                        for public_name, field_name in (
+                            self._alias_namespace.public_to_canonical.items()
+                        )
+                    }
+                )
+            )
         return self.adapter.field_names()
+
+    @property
+    def aliases(self) -> MappingProxyType[str, str]:
+        """Return the configured ``field name -> alias`` mapping."""
+        if self._alias_namespace is None:
+            return MappingProxyType({})
+        return MappingProxyType(dict(self._alias_namespace.canonical_to_public))
+
+    @property
+    def alias_map(self) -> MappingProxyType[str, str]:
+        """Alias of :attr:`aliases`."""
+        return self.aliases
+
+    def with_aliases(
+        self,
+        aliases: Mapping[str, str],
+        *,
+        allow_original_names: bool | None = None,
+    ) -> ItemAdapter:
+        """Return another adapter view for the same item with caller aliases."""
+        if allow_original_names is None:
+            allow_original_names = self._allow_original_names
+        return self.__class__(
+            self.item,
+            aliases=aliases,
+            allow_original_names=allow_original_names,
+        )
+
+    def alias_view(
+        self,
+        aliases: Mapping[str, str] | None = None,
+        *,
+        allow_original_names: bool | None = None,
+    ) -> ItemAdapter:
+        """Return an alias view of this adapter.
+
+        This method can also be called on the class with the item as the first
+        argument, e.g. ``ItemAdapter.alias_view(item, aliases)``.
+        """
+        if isinstance(self, ItemAdapter):
+            if allow_original_names is None:
+                allow_original_names = self._allow_original_names
+            return self.__class__(
+                self.item,
+                aliases=aliases,
+                allow_original_names=allow_original_names,
+            )
+        return ItemAdapter(
+            self,
+            aliases=aliases,
+            allow_original_names=bool(allow_original_names),
+        )
 
     def asdict(self) -> dict[str, Any]:
         """Return a dict object with the contents of the adapter. This works slightly different
